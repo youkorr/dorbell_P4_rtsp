@@ -51,15 +51,17 @@ les deux sens : les navigateurs encodent et décodent nativement le PCMU/PCMA.
 
 ```yaml
 external_components:
+  # `rtsp_server` et l'option `enable_h264` d'esp_video vivent pour l'instant sur
+  # cette branche de travail ; remplacez par `main` une fois la PR fusionnée.
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
-      ref: main
+      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
     components: [rtsp_server]
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
-      ref: main
+      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
     components: [esp_video]
 
 esp_video:

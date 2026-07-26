@@ -100,17 +100,20 @@ psram:
   mode: hex
   speed: 200MHz
 
+# NOTE: `rtsp_server` et l'option `enable_h264` d'esp_video vivent pour l'instant
+# sur la branche de travail ci-dessous. Une fois la PR fusionnee, remplacez ces
+# deux `ref:` par `main`.
 external_components:
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
-      ref: main
+      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
     components: [rtsp_server]
     refresh: 0s
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
-      ref: main
+      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
     components: [esp_video, esp_cam_sensor, lvgl_camera_display]
     refresh: 0s
   - source:
@@ -122,6 +125,8 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/face-toface
+      # Alignez ce ref sur celui qui fonctionne dans votre espwebrtcvisio1.yaml
+      # si `fdaudio` n'est pas encore sur main.
       ref: main
     components: [fdaudio]
     refresh: 0s
