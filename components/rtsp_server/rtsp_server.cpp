@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "esp_netif.h"
 #include "esphome/components/network/util.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
@@ -76,6 +77,22 @@ static int parse_track_id(const std::string &url) {
   if (pos == std::string::npos)
     return -1;
   return atoi(url.c_str() + pos + 8);
+}
+
+/// The address a client should dial.
+///
+/// ESPHome's own network helpers have been renamed across releases
+/// (`network::get_use_address()` is gone in 2026.8), so ask lwIP's default
+/// interface directly: that API is stable and is the same answer anyway.
+static std::string default_local_address() {
+  esp_netif_t *netif = esp_netif_get_default_netif();
+  esp_netif_ip_info_t info = {};
+  if (netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), IPSTR, IP2STR(&info.ip));
+    return std::string(buf);
+  }
+  return "0.0.0.0";
 }
 
 static std::string hex_byte(uint8_t value) {
@@ -180,13 +197,15 @@ bool RTSPServer::start_pipelines_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "listening on rtsp://%s:%u%s", network::get_use_address().c_str(), this->port_, this->path_.c_str());
+  ESP_LOGI(TAG, "listening on rtsp://%s:%u%s", default_local_address().c_str(), this->port_,
+           this->path_.c_str());
   return true;
 }
 
 void RTSPServer::dump_config() {
   ESP_LOGCONFIG(TAG, "RTSP server:");
-  ESP_LOGCONFIG(TAG, "  URL: rtsp://%s:%u%s", network::get_use_address().c_str(), this->port_, this->path_.c_str());
+  ESP_LOGCONFIG(TAG, "  URL: rtsp://%s:%u%s", default_local_address().c_str(), this->port_,
+                this->path_.c_str());
   ESP_LOGCONFIG(TAG, "  Authentication: %s", this->auth_token_.empty() ? "disabled" : "basic");
   ESP_LOGCONFIG(TAG, "  Max clients: %u", this->max_clients_);
   ESP_LOGCONFIG(TAG, "  RTP packet size: %u bytes", this->packet_size_);
@@ -712,12 +731,19 @@ std::string RTSPServer::build_sdp_(const std::string &local_ip, bool with_backch
   return sdp;
 }
 
+std::string RTSPServer::stream_url() const {
+  char buf[96];
+  snprintf(buf, sizeof(buf), "rtsp://%s:%u%s", default_local_address().c_str(), this->port_,
+           this->path_.c_str());
+  return std::string(buf);
+}
+
 std::string RTSPServer::local_ip_of_(int fd) const {
   struct sockaddr_in addr = {};
   socklen_t len = sizeof(addr);
   if (getsockname(fd, reinterpret_cast<struct sockaddr *>(&addr), &len) == 0)
     return std::string(inet_ntoa(addr.sin_addr));
-  return network::get_use_address();
+  return default_local_address();
 }
 
 // ---------------------------------------------------------------------------

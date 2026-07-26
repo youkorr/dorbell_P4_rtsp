@@ -469,7 +469,7 @@ interval:
     then:
       - lvgl.label.update:
           id: rtsp_url
-          text: !lambda 'return "rtsp://" + network::get_use_address() + ":8554/doorbell";'
+          text: !lambda 'return id(doorbell_stream).stream_url();'
       - lvgl.label.update:
           id: client_count
           text: !lambda |-

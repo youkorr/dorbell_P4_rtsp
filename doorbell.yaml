@@ -200,8 +200,7 @@ light:
 text_sensor:
   - platform: template
     name: "Flux RTSP"
-    lambda: |-
-      return {"rtsp://" + network::get_use_address() + ":8554/doorbell"};
+    lambda: 'return {id(doorbell_stream).stream_url()};'
     update_interval: 60s
 
 sensor:

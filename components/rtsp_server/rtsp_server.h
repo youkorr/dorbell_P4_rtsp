@@ -79,6 +79,9 @@ class RTSPServer : public Component, public RtpSender {
   void add_on_talk_end_callback(std::function<void()> &&cb) { this->talk_end_callback_.add(std::move(cb)); }
 
   // ---- state, usable from lambdas -----------------------------------------
+  /// Full RTSP URL of this stream, e.g. "rtsp://192.168.1.50:8554/doorbell".
+  /// Handy for a text_sensor or an on-screen label.
+  std::string stream_url() const;
   uint8_t client_count() const { return this->client_count_; }
   bool is_streaming() const { return this->active_streams_ > 0; }
   bool is_talking() const { return this->audio_.is_talking(); }
