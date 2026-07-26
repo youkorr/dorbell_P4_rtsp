@@ -110,6 +110,18 @@ MIC_MODES = {
 CHANNELS = {"left": False, "right": True}
 
 
+def _selected(value):
+    """Name of the option a ``cv.enum`` validator accepted.
+
+    ``cv.enum`` returns the validated *key* (an ``EnumValue``, i.e. a ``str``
+    subclass) and keeps the mapped C++ object on ``.enum_value``. Comparing it
+    against that mapped object is a trap: ``MockObj.__eq__`` builds a C++
+    expression rather than answering a question, and the resulting object is
+    always truthy. So compare names, never mapped values.
+    """
+    return str(value)
+
+
 def _validate_path(value):
     value = cv.string(value)
     if not value.startswith("/"):
@@ -144,7 +156,7 @@ VIDEO_SCHEMA = cv.Schema(
 
 
 def _validate_video(config):
-    if config[CONF_CODEC] == VIDEO_CODECS["h264"] and CONF_CAMERA_ID in config:
+    if _selected(config[CONF_CODEC]) == "h264" and CONF_CAMERA_ID in config:
         raise cv.Invalid(
             "'codec: h264' reads YUV420 straight from the V4L2 device and cannot share an "
             "esp_cam_sensor camera (which delivers RGB565). Remove 'camera_id', or use 'codec: mjpeg'."
@@ -204,7 +216,7 @@ def _validate_audio(config):
     if CONF_SPEAKER_ID in config:
         raise cv.Invalid("'speaker_id' cannot be combined with the I2S 'microphone' block; use 'microphone_id'")
 
-    if mic[CONF_MODE] == MIC_MODES["std"] and CONF_BCLK_PIN not in mic:
+    if _selected(mic[CONF_MODE]) == "std" and CONF_BCLK_PIN not in mic:
         raise cv.Invalid("'bclk_pin' is required for a standard I2S microphone", [CONF_MICROPHONE])
 
     spk = config.get(CONF_SPEAKER)
@@ -213,7 +225,7 @@ def _validate_audio(config):
 
     # Microphone and speaker share one I2S port: they must share its clock and
     # slot layout, and sit in different slots.
-    if mic[CONF_MODE] != MIC_MODES["std"]:
+    if _selected(mic[CONF_MODE]) != "std":
         raise cv.Invalid(
             "a PDM microphone cannot share an I2S port with the speaker; give the speaker its own 'i2s_port'"
         )
@@ -290,7 +302,7 @@ def _final_validate(config):
             "add an 'esp_video:' block"
         )
 
-    if config[CONF_VIDEO][CONF_CODEC] == VIDEO_CODECS["h264"]:
+    if _selected(config[CONF_VIDEO][CONF_CODEC]) == "h264":
         # esp_video only builds /dev/video11 when it is asked to.
         entries = esp_video if isinstance(esp_video, list) else [esp_video]
         if not any(entry.get("enable_h264") for entry in entries if isinstance(entry, dict)):
