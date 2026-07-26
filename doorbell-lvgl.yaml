@@ -1,0 +1,472 @@
+## ===========================================================================
+##  ESP32-P4 — Sonnette RTSP avec écran LVGL (banc de test)
+##
+##  Variante "avec écran" de doorbell.yaml, calquée sur la base matérielle
+##  validée d'espwebrtcvisio1.yaml : écran MIPI-DSI 1024x600, tactile GT911,
+##  caméra OV5647, audio fdaudio (ES8311 + ES7210), WiFi via ESP-Hosted C6.
+##
+##  La caméra est PARTAGÉE : lvgl_camera_display affiche l'aperçu local sur le
+##  canvas, et rtsp_server encode les MÊMES trames RGB565 en MJPEG pour le flux.
+##  Une seule tâche fait le dequeue V4L2 (drive_camera), donc aucun conflit.
+##
+##  Codec vidéo = MJPEG (encodeur JPEG matériel du P4). H.264 reste disponible
+##  en option (voir la note plus bas), mais il exige la source V4L2 directe et
+##  donc de renoncer à l'aperçu LVGL.
+## ===========================================================================
+
+substitutions:
+  name: doorbell-p4-lvgl
+  friendly_name: Sonnette P4
+  col_bg: "0x0B0F14"
+  col_panel: "0x161B22"
+  col_text: "0xE6EDF3"
+  col_text2: "0x8B949E"
+  col_green: "0x2EA043"
+  col_red: "0xE5484D"
+  col_amber: "0xF0883E"
+  font_family: Figtree
+  font_glyphsets: "GF_Latin_Core"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  flash_size: 32MB
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  engineering_sample: true
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+    sdkconfig_options:
+      CONFIG_COMPILER_OPTIMIZATION_PERF: y
+      CONFIG_SPIRAM_XIP_FROM_PSRAM: y
+      CONFIG_GDMA_ISR_IRAM_SAFE: y
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_SPIRAM_SPEED_200M: "y"
+      CONFIG_SPIRAM_SPEED: "200"
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      # Le serveur RTSP pousse le RTP directement dans lwIP : de la marge sur
+      # les sockets et les buffers TCP évite les à-coups sur les trames JPEG.
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  use_psram: true
+  slot: 1
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/dorbell_P4_rtsp
+      ref: main
+    components: [rtsp_server]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: main
+    components: [esp_video, esp_cam_sensor, lvgl_camera_display]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/lvgl_9.5
+      ref: main
+    components: [lvgl, image, font]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: main
+    components: [fdaudio]
+    refresh: 0s
+
+## ===========================================================================
+##  Bus, audio, caméra, écran (base matérielle)
+## ===========================================================================
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO07
+    scl: GPIO08
+    frequency: 400kHz
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+  - voltage: 2.5V
+    channel: 4
+
+# Codec audio de la carte : ES8311 en sortie, ES7210 en entrée.
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 24
+  output_volume: 60
+  sample_rate: 16000
+  enable_aec: false
+
+microphone:
+  - platform: fdaudio
+    id: board_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: board_speaker
+    fdaudio_id: audio_engine
+
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_isp: true
+  use_heap_allocator: false
+  # MJPEG passe par l'encodeur JPEG matériel de l'IDF, pas par /dev/video10 :
+  # `enable_h264` n'est nécessaire que si vous basculez sur `codec: h264`.
+  enable_h264: false
+
+esp_cam_sensor:
+  id: p4_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647
+  resolution: "800x640"
+  framerate: 30
+  mirror_x: false
+  mirror_y: false
+  rotation: 0
+
+# Aperçu local sur le canvas LVGL. Il consomme la même caméra que rtsp_server.
+lvgl_camera_display:
+  id: camera_display
+  camera_id: p4_cam
+  canvas_id: camera_canvas
+  update_interval: 33ms
+
+## ===========================================================================
+##  Serveur RTSP — MJPEG + audio bidirectionnel via le codec de la carte
+## ===========================================================================
+
+rtsp_server:
+  id: doorbell_stream
+  port: 8554
+  path: /doorbell
+  username: !secret rtsp_username
+  password: !secret rtsp_password
+
+  video:
+    codec: mjpeg
+    # Partage les trames RGB565 de la caméra avec LVGL.
+    camera_id: p4_cam
+    # lvgl_camera_display fait déjà le dequeue V4L2 : rtsp_server se contente
+    # de lire la trame courante. Mettez true si vous retirez l'aperçu LVGL.
+    drive_camera: false
+    framerate: 15
+    jpeg_quality: 25
+    # --- Option H.264 (test) -------------------------------------------------
+    # H.264 lit du YUV420 directement sur /dev/video0 et ne peut donc PAS
+    # partager la caméra avec LVGL. Pour l'essayer :
+    #   1. enable_h264: true dans le bloc esp_video ci-dessus
+    #   2. supprimer camera_id / drive_camera et le bloc lvgl_camera_display
+    #   3. codec: h264
+    # codec: h264
+    # bitrate: 1500000
+    # gop: 15
+
+  audio:
+    codec: pcmu
+    sample_rate: 16000
+    # On réutilise le micro et le haut-parleur de la carte (fdaudio) au lieu de
+    # piloter des broches I2S : le codec reste partagé avec les autres usages.
+    microphone_id: board_microphone
+    speaker_id: board_speaker
+    half_duplex: true
+    talk_timeout: 300ms
+
+  on_client_connected:
+    - lvgl.label.update:
+        id: stream_status
+        text: "● Flux actif"
+        text_color: ${col_green}
+  on_client_disconnected:
+    - lvgl.label.update:
+        id: stream_status
+        text: "● En attente"
+        text_color: ${col_text2}
+  on_talk_start:
+    - lvgl.label.update:
+        id: talk_status
+        text: "🔊 On vous parle"
+        text_color: ${col_amber}
+    - lvgl.widget.show: talk_status
+  on_talk_end:
+    - lvgl.widget.hide: talk_status
+
+## ===========================================================================
+##  Bouton de sonnette, carillon, écran
+## ===========================================================================
+
+binary_sensor:
+  - platform: gpio
+    id: doorbell_button
+    name: "Bouton"
+    pin:
+      number: GPIO32
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 100ms
+    on_press:
+      - switch.turn_on: chime_relay
+      - lvgl.label.update:
+          id: stream_status
+          text: "● Sonnerie !"
+          text_color: ${col_amber}
+      - light.turn_on: backlight
+      - delay: 1s
+      - switch.turn_off: chime_relay
+
+switch:
+  - platform: gpio
+    pin: GPIO53
+    name: "Amplificateur audio"
+    id: audio_amplifier
+    restore_mode: ALWAYS_ON
+  - platform: gpio
+    id: chime_relay
+    name: "Carillon"
+    pin: GPIO33
+    restore_mode: ALWAYS_OFF
+
+output:
+  - platform: ledc
+    pin: GPIO31
+    id: backlight_pwm
+    frequency: 1000Hz
+    inverted: true
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Rétroéclairage"
+    id: backlight
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 250ms
+
+font:
+  - file: {type: gfonts, family: "${font_family}", weight: 300}
+    id: f_18
+    size: 18
+    glyphsets: ["${font_glyphsets}"]
+  - file: {type: gfonts, family: "${font_family}", weight: 600}
+    id: f_24
+    size: 24
+    glyphsets: ["${font_glyphsets}"]
+
+touchscreen:
+  - platform: gt911
+    id: touch
+    i2c_id: bsp_bus
+    reset_pin: GPIO23
+    update_interval: 8ms
+    on_touch:
+      - light.turn_on: backlight
+    transform:
+      swap_xy: false
+      mirror_x: true
+      mirror_y: true
+
+display:
+  - platform: mipi_dsi
+    id: main_display
+    show_test_card: false
+    model: CUSTOM
+    update_interval: never
+    auto_clear_enabled: false
+    hsync_back_porch: 160
+    lane_bit_rate: 1000Mbps
+    color_order: rgb
+    lanes: 2
+    reset_pin:
+      number: 33
+    hsync_pulse_width: 70
+    hsync_front_porch: 160
+    vsync_back_porch: 23
+    vsync_pulse_width: 1
+    vsync_front_porch: 12
+    pclk_frequency: 51MHz
+    dimensions:
+      width: 1024
+      height: 600
+    init_sequence:
+      - [0xB2, 0x10]
+      - [0x80, 0x8B]
+      - [0x81, 0x78]
+      - [0x82, 0x84]
+      - [0x83, 0x88]
+      - [0x84, 0xA8]
+      - [0x85, 0xE3]
+      - [0x86, 0x88]
+      - [0x11, 0x00]
+      - delay 120ms
+      - [0x29]
+
+## ===========================================================================
+##  Interface LVGL — aperçu caméra + état du flux
+## ===========================================================================
+
+lvgl:
+  use_ppa: true
+  use_ppa_img: true
+  color_depth: 16
+  buffer_size: 100%
+  byte_order: little_endian
+  rotation: 180
+  bg_color: ${col_bg}
+  pages:
+    - id: doorbell_page
+      bg_color: ${col_bg}
+      on_load:
+        - lambda: 'id(camera_display).configure_canvas(id(camera_canvas));'
+      widgets:
+        # ---------- Barre de titre ----------
+        - obj:
+            x: 0
+            y: 0
+            width: 1024
+            height: 52
+            bg_color: ${col_panel}
+            bg_opa: COVER
+            border_width: 0
+            radius: 0
+            pad_all: 0
+            widgets:
+              - label:
+                  x: 16
+                  y: 12
+                  text: "Sonnette ESP32-P4"
+                  text_color: ${col_text}
+                  text_font: f_24
+              - label:
+                  id: stream_status
+                  align: RIGHT_MID
+                  x: -16
+                  text: "● En attente"
+                  text_color: ${col_text2}
+                  text_font: f_18
+
+        # ---------- Aperçu caméra ----------
+        - canvas:
+            id: camera_canvas
+            x: 16
+            y: 64
+            width: 800
+            height: 512
+            bg_color: 0x000000
+            bg_opa: COVER
+            border_width: 2
+            border_color: ${col_panel}
+            radius: 8
+            pad_all: 0
+
+        # ---------- Panneau de droite ----------
+        - label:
+            x: 836
+            y: 72
+            text: "Flux RTSP"
+            text_color: ${col_text2}
+            text_font: f_18
+        - label:
+            id: rtsp_url
+            x: 836
+            y: 100
+            width: 176
+            text: "…"
+            text_color: ${col_text}
+            text_font: f_18
+            long_mode: WRAP
+
+        - label:
+            id: talk_status
+            x: 836
+            y: 200
+            hidden: true
+            text: "🔊 On vous parle"
+            text_color: ${col_amber}
+            text_font: f_18
+
+        - label:
+            id: client_count
+            x: 836
+            y: 260
+            text: "0 client"
+            text_color: ${col_text2}
+            text_font: f_18
+
+interval:
+  - interval: 5s
+    then:
+      - lvgl.label.update:
+          id: rtsp_url
+          text: !lambda 'return "rtsp://" + network::get_use_address() + ":8554/doorbell";'
+      - lvgl.label.update:
+          id: client_count
+          text: !lambda |-
+            const uint8_t n = id(doorbell_stream).client_count();
+            return std::to_string(n) + (n > 1 ? " clients" : " client");
