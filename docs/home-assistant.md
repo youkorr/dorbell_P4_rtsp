@@ -1,6 +1,60 @@
 # Intégration Home Assistant
 
-## 0. MJPEG : quel flux go2rtc utiliser ?
+## 0. Comment Home Assistant trouve-t-il le flux ?
+
+Il ne le trouve pas : **il n'y a aucune découverte automatique**, et Home
+Assistant ne parle jamais au P4 en RTSP. La chaîne est en deux temps :
+
+```
+   P4  ──RTSP──►  go2rtc  ──WebRTC──►  Home Assistant
+        ▲
+        └── adresse écrite À LA MAIN dans go2rtc.yaml
+```
+
+1. Le P4 ouvre son serveur RTSP sur `rtsp://<ip-du-P4>:8554/doorbell`.
+2. **Vous** inscrivez cette adresse dans `go2rtc.yaml`.
+3. Home Assistant ne connaît que go2rtc. Le P4 n'apparaît nulle part côté flux.
+
+Le P4 est donc découvert par Home Assistant **en tant qu'appareil ESPHome**
+(via l'API native, mDNS) — bouton, carillon, capteurs — mais son flux vidéo,
+lui, transite uniquement par go2rtc.
+
+### Conséquence : le P4 doit avoir une adresse stable
+
+Sinon go2rtc le perd au renouvellement du bail DHCP. Deux options :
+
+```yaml
+# Option A — par nom mDNS, publié automatiquement par ESPHome
+streams:
+  doorbell:
+    - rtsp://user:pass@doorbell-p4-lvgl.local:8554/doorbell
+```
+
+Le nom vient de la clé `esphome: name:`. Cela suppose que la machine qui fait
+tourner go2rtc résout le mDNS : c'est le cas sur Home Assistant OS, souvent pas
+dans un conteneur Docker isolé.
+
+```yaml
+# Option B — par IP, avec une réservation DHCP sur votre box (recommandé)
+streams:
+  doorbell:
+    - rtsp://user:pass@192.168.1.50:8554/doorbell
+```
+
+### Où lire l'adresse du P4
+
+- Dans les logs ESPHome au démarrage :
+  `[rtsp_server]: listening on rtsp://192.168.1.50:8554/doorbell`
+- Dans Home Assistant, via le capteur **« Flux RTSP »** exposé par les deux
+  exemples de configuration : il affiche l'URL complète, prête à coller dans
+  `go2rtc.yaml`.
+- `esphome logs doorbell-lvgl.yaml` depuis la ligne de commande.
+
+Les `user:pass` de l'URL sont les `username:` / `password:` du bloc
+`rtsp_server:`. S'ils sont absents de votre configuration, le flux est ouvert et
+l'URL se réduit à `rtsp://192.168.1.50:8554/doorbell`.
+
+## 1. MJPEG : quel flux go2rtc utiliser ?
 
 Le composant sort du **MJPEG** par défaut. WebRTC ne sait pas transporter du
 MJPEG, donc pour la carte Lovelace (mode `webrtc`, indispensable au
@@ -19,7 +73,7 @@ machine Home Assistant change.
 Dans les exemples ci-dessous, remplacez `doorbell_webrtc` par `doorbell` si vous
 êtes passé en `codec: h264`.
 
-## 1. Prérequis
+## 2. Prérequis
 
 | Élément | Pourquoi |
 |---|---|
@@ -31,7 +85,7 @@ Dans les exemples ci-dessous, remplacez `doorbell_webrtc` par `doorbell` si vous
 sûres par les navigateurs ; **une IP de LAN en clair ne l'est pas**. C'est de
 loin la cause n°1 des « le son descend mais je ne peux pas parler ».
 
-## 2. Exposer le flux comme entité caméra
+## 3. Exposer le flux comme entité caméra
 
 ```yaml
 # configuration.yaml
@@ -53,7 +107,7 @@ Avec l'intégration [WebRTC Camera d'AlexxIT](https://github.com/AlexxIT/WebRTC)
 installée via HACS, les flux déclarés dans `go2rtc.yaml` sont directement
 utilisables par leur nom (`doorbell`), sans entité caméra.
 
-## 3. Carte Lovelace — WebRTC Camera (AlexxIT)
+## 4. Carte Lovelace — WebRTC Camera (AlexxIT)
 
 C'est la mise en œuvre la plus directe du push-to-talk :
 
@@ -69,7 +123,7 @@ ui: true
 `microphone` dans `media` est ce qui fait apparaître le bouton micro et
 déclenche la négociation du backchannel. Sans lui, le flux reste descendant.
 
-## 4. Carte Lovelace — Advanced Camera Card
+## 5. Carte Lovelace — Advanced Camera Card
 
 La carte que vous visez ([card.camera](https://card.camera/#/examples?id=doorbell)),
 avec le bouton en mode **momentané**, c'est-à-dire un vrai push-to-talk :
@@ -105,7 +159,7 @@ interrupteur marche/arrêt.
 > comme ci-dessus. Si le bouton micro reste inactif, repliez-vous sur
 > `custom:webrtc-camera`, qui n'a pas cette restriction.
 
-## 5. Automatisation : appui sur le bouton → notification
+## 6. Automatisation : appui sur le bouton → notification
 
 Le bouton et le relais du carillon sont gérés par ESPHome (`doorbell.yaml`),
 donc côté Home Assistant il ne reste que la notification :
@@ -161,7 +215,7 @@ views:
               type: momentary
 ```
 
-## 6. Vérifier que l'audio bidirectionnel est bien négocié
+## 7. Vérifier que l'audio bidirectionnel est bien négocié
 
 1. Ouvrez l'interface de go2rtc : `http://192.168.1.10:1984`.
 2. Sur le flux `doorbell`, cliquez **probe**. Vous devez voir **trois** pistes :
@@ -180,13 +234,14 @@ views:
    doit porter l'en-tête `Require: www.onvif.org/ver20/backchannel`, et le SDP
    renvoyé par le P4 doit contenir `a=sendonly`.
 
-## 7. Diagnostic
+## 8. Diagnostic
 
 | Symptôme | Cause probable |
 |---|---|
+| go2rtc ne se connecte pas au P4 | l'IP a changé : réservation DHCP, ou passez au nom mDNS (étape 0) |
 | Bouton micro absent ou inerte | Home Assistant en HTTP → passez en HTTPS |
 | Image OK, aucun son montant | pas de `microphone` dans `media` (webrtc-camera) |
-| Image OK, on ne peut pas parler | backchannel non négocié → étape 6 |
+| Image OK, on ne peut pas parler | backchannel non négocié → étape 7 |
 | Le son se coupe quand on parle | normal : `half_duplex: true` coupe le micro pendant l'émission |
 | Larsen | l'ampli reste alimenté : câblez la broche `SD` (voir `docs/hardware.md`) |
 | Image saccadée ou verte au démarrage (H.264) | le client attend la première trame clé — au plus `gop / framerate` secondes |
