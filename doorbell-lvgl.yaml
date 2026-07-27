@@ -336,6 +336,16 @@ script:
           text: "● En attente"
           text_color: ${col_text2}
 
+# Déclenche la même séquence que le bouton tactile, mais depuis Home Assistant.
+# C'est cette entité qu'on accroche à un bouton de la carte Lovelace.
+button:
+  - platform: template
+    name: "Sonner"
+    id: ring_button
+    icon: mdi:bell-ring
+    on_press:
+      - script.execute: ring
+
 switch:
   # NOTE : cette carte n'a PAS de relais de carillon sur GPIO — GPIO33 porte le
   # `reset_pin` de l'écran MIPI-DSI (voir le bloc `display:`). Le carillon est
