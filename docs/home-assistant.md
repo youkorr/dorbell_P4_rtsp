@@ -134,6 +134,27 @@ Les règles de la section 1 restent valables : le transcodage H.264 est
 nécessaire tant que le P4 est en `codec: mjpeg`, et la ligne `#backchannel=1`
 séparée reste ce qui porte le push-to-talk.
 
+### « Conversation bidirectionnelle non disponible pour ce flux »
+
+Ce message de l'interface Frigate ne dit rien du flux : **Frigate désactive la
+conversation bidirectionnelle hors contexte sécurisé**, quelle que soit la
+qualité de la négociation ONVIF derrière. Ses deux ports n'ont pas les mêmes
+droits :
+
+| Port | Usage |
+|---|---|
+| `5000` | HTTP direct, sans authentification — **pas de conversation bidirectionnelle** |
+| `8971` | HTTPS authentifié — celui qu'il faut |
+
+Ouvrez `https://<frigate>:8971` et acceptez l'exception de certificat
+(auto-signé). Publiez le port dans la configuration réseau de l'add-on s'il ne
+l'est pas, en même temps que `8555/tcp` et `8555/udp`, sans lesquels le
+navigateur ne peut établir la connexion WebRTC.
+
+La même règle s'applique à la carte Lovelace : sur un Home Assistant en HTTP,
+le bouton micro reste inerte. C'est le navigateur qui refuse `getUserMedia()`,
+pas la carte.
+
 ## 1. MJPEG : quel flux go2rtc utiliser ?
 
 Le composant sort du **MJPEG** par défaut. WebRTC ne sait pas transporter du
