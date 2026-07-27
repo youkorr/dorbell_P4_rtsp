@@ -102,7 +102,9 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
-      ref: claude/usb-uvc-consumer-integration-gnbflf
+      # Meme arbre que claude/usb-uvc-consumer-integration-gnbflf, au commit
+      # pres : la branche de travail commune, pour n'avoir qu'un nom a suivre.
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [esp_video, esp_cam_sensor, lvgl_camera_display]
     refresh: 0s 
   - source:
