@@ -38,6 +38,20 @@ else
 fi
 
 echo
+echo "== YAML lambdas =="
+# Lambdas in the example configs are compiled into main.cpp, so they can break
+# the build just like the component does — but no compiler here ever sees them.
+# Guard the ESPHome helpers that have been renamed or removed under us.
+removed='network::get_use_address|network::get_ip_address\(|App\.get_compilation_time'
+if grep -nE "$removed" ./*.yaml 2>/dev/null; then
+  echo "  FAILED: an example lambda calls an ESPHome helper that no longer exists."
+  echo "          Prefer a method on the component (e.g. stream_url())."
+  fail=1
+else
+  echo "  OK   no example lambda calls a removed ESPHome helper"
+fi
+
+echo
 echo "== compile =="
 for f in "$SRC"/*.cpp; do
   name=$(basename "$f")

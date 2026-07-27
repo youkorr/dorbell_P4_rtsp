@@ -1,3 +1,6 @@
+# NOTE : ce fichier est un EXEMPLE à copier dans /config/esphome/.
+# `external_components` ne récupère que `components/`, pas ce YAML : après une
+# mise à jour du dépôt, recopiez ce fichier si vous voulez les corrections.
 # ESP32-P4 smart doorbell: MIPI-CSI camera + RTSP with two-way audio.
 #
 #   OV5647 --MIPI CSI--> ESP32-P4 --MJPEG/RTSP--> go2rtc --WebRTC--> Home Assistant
