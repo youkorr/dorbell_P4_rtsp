@@ -167,6 +167,16 @@ void RTSPServer::loop() {
     }
     this->last_reported_talking_ = talking;
   }
+
+  // Periodic summary. Every 10 s while a client is connected -- the window in
+  // which a fault is actually being reproduced -- and every 60 s when idle, so
+  // an unattended log still shows the doorbell is alive without drowning it.
+  const uint32_t now = millis();
+  const uint32_t period = clients > 0 ? 10000 : 60000;
+  if (now - this->last_status_ms_ >= period) {
+    this->last_status_ms_ = now;
+    this->log_status_();
+  }
 }
 
 bool RTSPServer::start_pipelines_() {
@@ -358,6 +368,36 @@ bool RTSPServer::open_listener_() {
   }
 
   return true;
+}
+
+void RTSPServer::log_status_() {
+  const uint8_t mask = this->negotiated_mask_;
+  const auto yn = [](bool b) { return b ? "yes" : "NO "; };
+
+  ESP_LOGI(TAG, "--- status ------------------------------------------------");
+  ESP_LOGI(TAG, "  clients=%u playing=%u | negotiated by the last client: video=%s audio=%s backchannel=%s",
+           static_cast<unsigned>(this->client_count_), static_cast<unsigned>(this->active_streams_),
+           yn((mask & 0x01) != 0), yn((mask & 0x02) != 0), yn((mask & 0x04) != 0));
+  ESP_LOGI(TAG, "  video: %" PRIu32 " encoded, %" PRIu32 " skipped | tx: %" PRIu32 " packets, %" PRIu32
+                " frames dropped",
+           this->video_.frames_encoded(), this->video_.frames_dropped(), this->tx_overflows_,
+           this->tx_frames_dropped_);
+  if (this->audio_.is_running()) {
+    ESP_LOGI(TAG, "  audio: mic %" PRIu32 " packets sent | backchannel %" PRIu32 " received, %" PRIu32 " dropped%s",
+             this->audio_.packets_sent(), this->audio_.packets_received(), this->audio_.packets_dropped(),
+             this->audio_.is_talking() ? "  <-- TALKING NOW" : "");
+  } else {
+    ESP_LOGI(TAG, "  audio: pipeline not running (no 'audio:' block configured?)");
+  }
+
+  // The three readings that place a fault without leaving this log:
+  //   backchannel=NO      -> the client never asked to talk (card mode, HTTPS,
+  //                          or go2rtc source without '#backchannel=1')
+  //   frames dropped > 0  -> the link cannot carry the stream: lower
+  //                          'jpeg_quality' or 'framerate'
+  //   backchannel received stuck at 0 while you press talk -> nothing reaches
+  //                          the device; the fault is upstream, not here
+  ESP_LOGI(TAG, "-----------------------------------------------------------");
 }
 
 void RTSPServer::network_task_trampoline_(void *arg) {
@@ -665,6 +705,15 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
       session.playing = true;
       this->active_streams_++;
     }
+
+    // Snapshot of what this client actually negotiated, as a single byte the
+    // main loop can read without touching `sessions_` (owned by this task).
+    // This is what answers "did the card ask for the backchannel at all?".
+    uint8_t mask = 0;
+    for (int k = 0; k < 3; k++)
+      if (session.setup[k])
+        mask |= static_cast<uint8_t>(1u << k);
+    this->negotiated_mask_ = mask;
 
     char extra[96];
     snprintf(extra, sizeof(extra), "Session: %s\r\nRange: npt=0.000-\r\n", session.session_id.c_str());

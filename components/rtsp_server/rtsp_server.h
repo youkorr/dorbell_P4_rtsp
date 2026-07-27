@@ -154,6 +154,14 @@ class RTSPServer : public Component, public RtpSender {
   /// Client-to-server RTP arriving while no backchannel is set up. Rate-limits
   /// the warning that would otherwise repeat on every packet.
   uint32_t stray_rtp_{0};
+  /// Tracks the last PLAYing client set up: bit0 video, bit1 audio, bit2
+  /// backchannel. A single byte so the main loop can read it without racing
+  /// against the network task, which owns `sessions_`.
+  volatile uint8_t negotiated_mask_{0};
+  uint32_t last_status_ms_{0};
+
+  /// Periodic one-block summary of the whole chain, for diagnosis.
+  void log_status_();
   /// Set when a video frame could not be queued whole: the rest of that frame
   /// is discarded so the receiver never sees a fragment with a hole in it.
   bool tx_dropping_frame_{false};
