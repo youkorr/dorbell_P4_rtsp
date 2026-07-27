@@ -272,15 +272,34 @@ interrupteur marche/arrêt.
 
 ## 6. Automatisation : appui sur le bouton → notification
 
-Le bouton et le relais du carillon sont gérés par ESPHome (`doorbell.yaml`),
-donc côté Home Assistant il ne reste que la notification :
+Le bouton est géré par ESPHome, donc côté Home Assistant il ne reste que la
+notification. **Sans cette automatisation, rien n'est envoyé** : le capteur
+change d'état et personne ne l'écoute. C'est la pièce qu'on oublie le plus
+souvent, parce que tout le reste de la chaîne a l'air de fonctionner.
+
+> À ne pas confondre avec le `notifications:` de `frigate.yaml` : celui-là
+> notifie sur **détection d'objet** et demande un abonnement depuis l'interface
+> de Frigate. Il ne connaît pas le bouton de la sonnette.
+
+### Trouver les deux identifiants
+
+Les deux lignes qui échouent silencieusement si elles sont fausses :
+
+- **`entity_id` du capteur.** ESPHome le construit à partir du nom de
+  l'appareil, pas du `friendly_name` que vous croyez : selon la configuration
+  cela donne `binary_sensor.doorbell_lvgl_bouton` ou
+  `binary_sensor.doorbell_p4_bouton`. Lisez-le dans **Outils de développement →
+  États** en filtrant sur `bouton`, et copiez-le tel quel.
+- **Le service de notification.** Il vaut `notify.mobile_app_<nom-du-mobile>`.
+  La liste exacte est dans **Outils de développement → Actions**, en tapant
+  `notify.`.
 
 ```yaml
 automation:
   - alias: Sonnette - notification
     trigger:
       - platform: state
-        entity_id: binary_sensor.doorbell_p4_bouton
+        entity_id: binary_sensor.doorbell_lvgl_bouton
         to: "on"
     action:
       - action: notify.mobile_app_telephone
