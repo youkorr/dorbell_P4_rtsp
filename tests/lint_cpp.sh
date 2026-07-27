@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# Host syntax-check of the component against stub headers.
+#
+# What this DOES catch: typos, wrong member names, signature mismatches between
+# our own files, headers that do not stand on their own, and the 32-bit
+# portability traps below.
+#
+# What it does NOT catch: whether our reading of the ESP-IDF and ESPHome APIs is
+# correct — the stubs in tests/stubs/ are that reading, not the real headers.
+# Only a real build proves those.
+#
+#   ./tests/lint_cpp.sh
+#
+set -uo pipefail
+cd "$(dirname "$0")/.."
+SRC=components/rtsp_server
+STUB=tests/stubs
+
+# The V4L2 header comes from the esp_video component; use the real one when it
+# is checked out next to us, otherwise skip the files that need it.
+V4L2=""
+for candidate in ../esphome_esp-video/components/esp_video/include; do
+  [ -f "$candidate/linux/videodev2.h" ] && V4L2="-I$candidate"
+done
+
+fail=0
+
+echo "== 32-bit portability =="
+# int32_t is `long int` on riscv32-esp-elf, so a bare literal and an int32_t
+# deduce to different template parameters and std::min/std::max will not compile.
+if grep -nE 'std::(min|max)\([^)]*(-?[0-9]+)' "$SRC"/*.cpp "$SRC"/*.h 2>/dev/null | grep -vE 'std::(min|max)<'; then
+  echo "  FAILED: std::min/std::max with a bare literal; use an explicit"
+  echo "          template argument or a hand-written clamp."
+  fail=1
+else
+  echo "  OK   no std::min/std::max mixing literals with fixed-width types"
+fi
+
+echo
+echo "== compile =="
+for f in "$SRC"/*.cpp; do
+  name=$(basename "$f")
+  [ -z "$V4L2" ] && case "$name" in video_pipeline.cpp|rtsp_server.cpp)
+    printf '  %-22s SKIPPED (needs esp_video for linux/videodev2.h)\n' "$name"; continue;; esac
+  printf '  %-22s ' "$name"
+  if out=$(g++ -std=gnu++17 -fsyntax-only -Wall -Wextra \
+        -Wno-unused-parameter -Wno-missing-field-initializers \
+        -I"$STUB" $V4L2 -I"$SRC" "$f" 2>&1); then
+    echo "OK"
+  else
+    echo "FAILED"; echo "$out" | head -30; fail=1
+  fi
+done
+
+echo
+echo "== headers stand alone =="
+for h in "$SRC"/*.h; do
+  name=$(basename "$h")
+  [ -z "$V4L2" ] && case "$name" in video_pipeline.h|rtsp_server.h)
+    printf '  %-22s SKIPPED\n' "$name"; continue;; esac
+  printf '  %-22s ' "$name"
+  if out=$(g++ -std=gnu++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter \
+        -I"$STUB" $V4L2 -I"$SRC" -x c++ "$h" 2>&1); then
+    echo "OK"
+  else
+    echo "FAILED"; echo "$out" | head -20; fail=1
+  fi
+done
+
+echo
+[ $fail -eq 0 ] && echo "lint passed" || echo "LINT FAILED"
+exit $fail

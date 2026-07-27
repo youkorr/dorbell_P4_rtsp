@@ -28,6 +28,19 @@ static const char *const TAG = "rtsp_server.audio";
 /// that can build up if the network delivers a burst.
 static constexpr size_t PLAYBACK_BUFFER_BYTES = G711_SAMPLE_RATE / 2;
 
+/// Saturate to the 16-bit PCM range.
+///
+/// Written out rather than with std::min/std::max on purpose: on riscv32 an
+/// int32_t is a `long int`, so bare literals and the value deduce to different
+/// template parameters and the call does not compile.
+static inline int16_t clamp_pcm16(int32_t value) {
+  if (value > 32767)
+    return 32767;
+  if (value < -32768)
+    return -32768;
+  return static_cast<int16_t>(value);
+}
+
 static i2s_slot_bit_width_t slot_width(uint8_t bits) {
   return bits == 16 ? I2S_SLOT_BIT_WIDTH_16BIT : I2S_SLOT_BIT_WIDTH_32BIT;
 }
@@ -386,14 +399,8 @@ void AudioPipeline::capture_run_() {
       // 16 kHz content from aliasing into the 8 kHz G.711 band.
       acc /= static_cast<int32_t>(decimation);
 
-      if (muted) {
-        acc = 0;
-      } else {
-        acc = static_cast<int32_t>(acc * this->config_.mic_gain);
-        acc = std::max(-32768, std::min(32767, acc));
-      }
-
-      encoded[out_count++] = this->compand_(static_cast<int16_t>(acc));
+      const int16_t sample = muted ? 0 : clamp_pcm16(static_cast<int32_t>(acc * this->config_.mic_gain));
+      encoded[out_count++] = this->compand_(sample);
       if (out_count == G711_SAMPLES_PER_PACKET)
         break;
     }
@@ -434,18 +441,17 @@ void AudioPipeline::playback_run_() {
 
     size_t out_samples = 0;
     for (size_t i = 0; i < got; i++) {
-      int32_t sample = this->expand_(encoded[i]);
-      sample = static_cast<int32_t>(sample * this->config_.speaker_volume);
-      sample = std::max(-32768, std::min(32767, sample));
+      const int16_t sample =
+          clamp_pcm16(static_cast<int32_t>(this->expand_(encoded[i]) * this->config_.speaker_volume));
 
       for (uint32_t k = 0; k < interpolation; k++) {
         // Linear interpolation between the previous and current 8 kHz sample.
         const int32_t interpolated =
-            previous + static_cast<int32_t>((sample - previous) * static_cast<int32_t>(k + 1) /
-                                            static_cast<int32_t>(interpolation));
-        pcm[out_samples++] = static_cast<int16_t>(interpolated);
+            previous + (static_cast<int32_t>(sample - previous) * static_cast<int32_t>(k + 1) /
+                        static_cast<int32_t>(interpolation));
+        pcm[out_samples++] = clamp_pcm16(interpolated);
       }
-      previous = static_cast<int16_t>(sample);
+      previous = sample;
     }
 
     this->write_pcm_(pcm.data(), out_samples);

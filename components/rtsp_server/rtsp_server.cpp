@@ -584,7 +584,7 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
     }
 
     // A SETUP without an explicit trackID addresses the first media, i.e. video.
-    const int track = std::max(0, parse_track_id(url));
+    const int track = std::max<int>(0, parse_track_id(url));
     if (track > 2) {
       this->send_simple_(session, 454, "Session Not Found", cseq);
       return;
