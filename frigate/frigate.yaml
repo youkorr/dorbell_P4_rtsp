@@ -13,11 +13,28 @@
 # Run ONE go2rtc: disable the standalone add-on's autostart before using this.
 #
 # ---------------------------------------------------------------------------
-# Secrets
+# Secrets — À FAIRE AVANT LE PREMIER DÉMARRAGE
 #
-# Frigate substitutes {VAR} from the environment. Define these in the add-on's
-# configuration (or the container's env) rather than writing passwords here:
-#   FRIGATE_MQTT_PASSWORD, FRIGATE_TAPO_PASSWORD, FRIGATE_DOORBELL_PASSWORD
+# Ce fichier ne contient aucun mot de passe : ils passent par la substitution
+# d'environnement de Frigate, `{FRIGATE_...}`.
+#
+# ATTENTION : si une de ces variables n'est pas définie, Frigate REJETTE la
+# configuration entière avec une ValidationError, sans dire laquelle manque.
+# C'est le premier point à vérifier devant un « Your configuration is invalid ».
+#
+# Trois variables sont utilisées ici :
+#   FRIGATE_MQTT_PASSWORD       mot de passe du broker MQTT
+#   FRIGATE_TAPO_PASSWORD       caméra Tapo
+#   FRIGATE_DOORBELL_PASSWORD   `password:` du bloc `rtsp_server:` de l'ESPHome
+#
+# Deux façons de les fournir :
+#
+#   a) Add-on Frigate : onglet Configuration -> Variables d'environnement.
+#   b) Docker : `environment:` du compose, ou un fichier `.env`.
+#
+# Si vous préférez écrire les mots de passe en clair dans VOTRE copie, cherchez
+# les `{FRIGATE_` ci-dessous et remplacez-les. Ne recommittez pas le fichier
+# ensuite : ce dépôt est public.
 # ---------------------------------------------------------------------------
 
 version: 0.17-0
