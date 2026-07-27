@@ -107,7 +107,9 @@ rtsp_server:
   path: /doorbell
   username: !secret rtsp_username
   password: !secret rtsp_password
-  max_clients: 2
+  # En MJPEG, go2rtc ouvre DEUX sessions RTSP (le transcodage H.264 + le
+  # backchannel). 3 laisse de la marge pour un VLC de diagnostic.
+  max_clients: 3
 
   video:
     codec: mjpeg # hardware JPEG encoder; H.264 is an option, see below

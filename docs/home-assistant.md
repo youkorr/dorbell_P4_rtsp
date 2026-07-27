@@ -73,6 +73,24 @@ machine Home Assistant change.
 Dans les exemples ci-dessous, remplacez `doorbell_webrtc` par `doorbell` si vous
 êtes passé en `codec: h264`.
 
+> **Le mode d'affichage MJPEG ne transporte aucun son.** MJPEG est un format
+> vidéo seul : une carte réglée sur `modes: [mjpeg]` donnera l'image sans jamais
+> le micro, quel que soit l'état du backchannel côté RTSP. Pour entendre la
+> sonnette il faut `modes: [webrtc]`, donc de la vidéo H.264 — d'où le
+> transcodage ci-dessus. Et dans le lecteur, pensez à couper le mute : les
+> navigateurs démarrent muets tant qu'on n'a pas cliqué.
+
+### Vérifier que go2rtc reçoit bien le flux
+
+| URL | Ce que ça teste |
+|---|---|
+| `http://<go2rtc>:1984/api/frame.jpeg?src=doorbell` | une **image fixe**, un instantané unique — normal qu'elle ne bouge pas dans la page ; rechargez pour en obtenir une nouvelle |
+| `http://<go2rtc>:1984/api/stream.mjpeg?src=doorbell` | le flux **en direct** : c'est le vrai test que le P4 débite des trames |
+
+Puis, dans l'interface go2rtc, le bouton **webrtc** sur `doorbell_webrtc` : tant
+qu'il n'affiche pas d'image, aucune carte Lovelace ne fonctionnera. Ce test isole
+go2rtc de Home Assistant et évite de chercher au mauvais endroit.
+
 ## 2. Prérequis
 
 | Élément | Pourquoi |
@@ -87,21 +105,34 @@ loin la cause n°1 des « le son descend mais je ne peux pas parler ».
 
 ## 3. Exposer le flux comme entité caméra
 
-```yaml
-# configuration.yaml
-camera:
-  - platform: generic
-    name: Sonnette
-    still_image_url: http://192.168.1.10:1984/api/frame.jpeg?src=doorbell
-    stream_source: rtsp://192.168.1.10:8554/doorbell_webrtc
-    verify_ssl: false
-```
+**La Generic Camera ne se configure plus en YAML.** Home Assistant l'a migrée
+vers l'interface : un bloc `camera: - platform: generic` dans
+`configuration.yaml` déclenche l'erreur « It's not possible to configure generic
+camera by adding `platform: generic` » et aucune entité n'est créée.
+
+**Paramètres → Appareils et services → + Ajouter une intégration →
+« Caméra générique »** (le nom est traduit ; à défaut, ouvrez directement
+`http://<ip-de-HA>:8123/config/integrations/dashboard/add?domain=generic`).
+
+| Champ | Valeur |
+|---|---|
+| URL de l'image fixe | `http://192.168.1.10:1984/api/frame.jpeg?src=doorbell` |
+| URL du flux | `rtsp://192.168.1.10:8554/doorbell_webrtc` |
+| Nom d'utilisateur / mot de passe | vides (go2rtc ne les demande pas) |
+| Vérifier le certificat SSL | décoché |
+| Protocole de transport RTSP | TCP |
+
+L'assistant affiche un aperçu avant de valider : s'il échoue là, le problème est
+dans go2rtc, pas dans Home Assistant.
 
 La vignette (`still_image_url`) peut venir du flux `doorbell` d'origine : en
 MJPEG, go2rtc extrait une image sans rien décoder.
 
-`192.168.1.10` est la machine qui fait tourner go2rtc, pas le P4 : on passe par
-go2rtc pour que le P4 n'ait qu'un seul client RTSP à servir.
+> **`192.168.1.10` est la machine qui fait tourner go2rtc, pas le P4.** C'est la
+> confusion la plus fréquente : le P4 ne sert que du RTSP sur le port 8554, il
+> n'a rien sur le 1984. Si vous ne connaissez pas l'adresse de go2rtc, lisez-la
+> dans les logs du P4 : `client connected from 192.168.1.38` — ce client, c'est
+> go2rtc.
 
 Avec l'intégration [WebRTC Camera d'AlexxIT](https://github.com/AlexxIT/WebRTC)
 installée via HACS, les flux déclarés dans `go2rtc.yaml` sont directement
@@ -239,6 +270,13 @@ views:
 | Symptôme | Cause probable |
 |---|---|
 | go2rtc ne se connecte pas au P4 | l'IP a changé : réservation DHCP, ou passez au nom mDNS (étape 0) |
+| WebRTC : écran noir, et les logs du P4 ne montrent qu'un `SETUP trackID=1` | go2rtc a jeté la vidéo JPEG, que WebRTC ne sait pas transporter : il faut le transcodage `ffmpeg:...#video=h264` (étape 1) |
+| `probe` sur `doorbell_webrtc` affiche encore `JPEG` | le transcodage ffmpeg échoue — retirez `#hardware` si la machine n'a pas d'encodeur VA-API |
+| Le port 1984 ne répond pas | vous visez le P4 au lieu de go2rtc : le P4 n'expose que le RTSP sur 8554 |
+| Image OK puis clients refusés (`refusing ...: already serving 2 clients`) | la chaîne MJPEG prend 2 sessions RTSP : passez `max_clients: 3` dans le YAML ESPHome |
+| Le push-to-talk marche une fois puis plus jamais | deux sources go2rtc demandent le backchannel : une seule doit l'avoir (voir `go2rtc/go2rtc.yaml`) |
+| `Custom element not found: ...` | la carte Lovelace n'est pas installée — passez par HACS, puis Ctrl+Shift+R |
+| « Échec de l'initialisation de la caméra » (Advanced Camera Card) | le `camera_entity` référencé n'existe pas : créez la Caméra générique par l'interface (étape 3) |
 | Bouton micro absent ou inerte | Home Assistant en HTTP → passez en HTTPS |
 | Image OK, aucun son montant | pas de `microphone` dans `media` (webrtc-camera) |
 | Image OK, on ne peut pas parler | backchannel non négocié → étape 7 |
