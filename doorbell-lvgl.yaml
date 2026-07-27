@@ -96,7 +96,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
-      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [rtsp_server]
     refresh: 0s
   - source:
@@ -202,23 +202,18 @@ rtsp_server:
   max_clients: 4
 
   video:
-    codec: mjpeg
+    # MJPEG, et rien d'autre. Le P4 sait encoder du H.264 mais pas le décoder :
+    # l'aperçu LVGL ne pourrait pas le réafficher, et son encodeur veut du YUV420
+    # là où LVGL veut du RGB565 — l'écran et le flux ne pourraient donc pas
+    # partager une seule caméra, qui est tout l'intérêt de ce montage.
     # Partage les trames RGB565 de la caméra avec LVGL.
     camera_id: p4_cam
     # lvgl_camera_display fait déjà le dequeue V4L2 : rtsp_server se contente
-    # de lire la trame courante. Mettez true si vous retirez l'aperçu LVGL.
+    # de lire la trame courante. L'interrupteur « Aperçu caméra locale » rend la
+    # main au serveur quand on éteint l'aperçu, donc le flux ne se fige jamais.
     drive_camera: false
     framerate: 15
     jpeg_quality: 25
-    # --- Option H.264 (test) -------------------------------------------------
-    # H.264 lit du YUV420 directement sur /dev/video0 et ne peut donc PAS
-    # partager la caméra avec LVGL. Pour l'essayer :
-    #   1. enable_h264: true dans le bloc esp_video ci-dessus
-    #   2. supprimer camera_id / drive_camera et le bloc lvgl_camera_display
-    #   3. codec: h264
-    # codec: h264
-    # bitrate: 1500000
-    # gop: 15
 
   audio:
     codec: pcmu
@@ -259,13 +254,65 @@ rtsp_server:
 
 
 ## ===========================================================================
-##  Bouton de sonnette, carillon, écran
+##  Sonnerie — les trois façons dont l'appui arrive dans Home Assistant
+##
+##  Un `binary_sensor` seul ne suffisait pas, et c'est la raison pour laquelle
+##  « j'appuie sur Sonner et il ne se passe rien dans Home Assistant » :
+##
+##   * il n'apparaît nulle part tout seul. Aucune carte caméra ne réagit à un
+##     binary_sensor ; il faut écrire une automatisation pour qu'il serve à
+##     quelque chose (docs/home-assistant.md §6) ;
+##   * il ne porte aucun `device_class`, donc Home Assistant ne peut pas deviner
+##     que c'est une sonnette ;
+##   * une impulsion peut être ratée : si l'API était déconnectée à cet instant,
+##     l'information est simplement perdue.
+##
+##  D'où les trois chemins ci-dessous, du plus utile au plus brut. Le premier
+##  suffit dans presque tous les cas.
 ## ===========================================================================
+
+# 1. L'entité que Home Assistant comprend NATIVEMENT comme une sonnette. Elle
+#    apparaît sous la forme `event.<appareil>_sonnette`, son état est l'horodatage
+#    du dernier appui, et elle se choisit directement comme déclencheur dans
+#    l'éditeur d'automatisations. C'est celle à utiliser.
+event:
+  - platform: template
+    id: doorbell_event
+    name: "Sonnette"
+    device_class: doorbell
+    event_types:
+      - pressed
+
 binary_sensor:
+  # 2. Le capteur d'état, pour les cartes et les conditions qui veulent un
+  #    on/off plutôt qu'un évènement. `occupancy` est la classe que Home
+  #    Assistant associe à « quelqu'un est à la porte ».
   - platform: template
     id: doorbell_button
     name: "Bouton"
-        
+    device_class: occupancy
+
+  # Diagnostic : l'audio, vu depuis Home Assistant. Ces trois entités répondent
+  # à « est-ce que le micro marche ? » sans ouvrir les logs.
+  - platform: template
+    name: "Micro actif"
+    id: mic_alive_sensor
+    device_class: problem
+    entity_category: diagnostic
+    # `problem` s'affiche à l'envers exprès : ON = il y a un problème, c'est-à-dire
+    # que la source micro ne délivre plus un seul échantillon.
+    lambda: 'return !id(doorbell_stream).mic_alive();'
+  - platform: template
+    name: "On vous parle"
+    id: talking_sensor
+    entity_category: diagnostic
+    lambda: 'return id(doorbell_stream).is_talking();'
+  - platform: template
+    name: "Flux RTSP actif"
+    id: streaming_sensor
+    entity_category: diagnostic
+    lambda: 'return id(doorbell_stream).is_streaming();'
+
 script:
   - id: ring
     mode: restart
@@ -276,12 +323,29 @@ script:
       - logger.log:
           format: "ring: sequence declenchee"
           level: INFO
+
+      # Chemin 1 : l'entité `event`. Home Assistant l'horodate et la conserve,
+      # donc rien n'est perdu même si personne ne regarde à cet instant.
+      - event.trigger:
+          id: doorbell_event
+          event_type: pressed
+
+      # Chemin 3 : un évènement brut sur le bus Home Assistant, pour les
+      # automatisations écrites en YAML. Se déclenche avec :
+      #   trigger: {platform: event, event_type: esphome.doorbell_pressed}
+      - homeassistant.event:
+          event: esphome.doorbell_pressed
+          data:
+            device: doorbell-p4-lvgl
+
+      # Chemin 2 : le capteur d'état.
       - binary_sensor.template.publish:
           id: doorbell_button
           state: true
       - logger.log:
-          format: "ring: binary_sensor 'Bouton' publie a ON"
+          format: "ring: event 'pressed' + binary_sensor 'Bouton' ON + evenement esphome.doorbell_pressed"
           level: INFO
+
       - lvgl.label.update:
           id: stream_status
           text: "Sonnerie !"
@@ -310,7 +374,74 @@ button:
     icon: mdi:bell-ring
     on_press:
       - script.execute: ring
-    
+
+  # Prouve le haut-parleur, à lui seul. S'il n'y a pas de bip, inutile de
+  # chercher le problème du côté de Home Assistant ou de go2rtc.
+  - platform: template
+    name: "Bip de test"
+    id: test_tone_button
+    icon: mdi:volume-high
+    entity_category: diagnostic
+    on_press:
+      - switch.turn_on: audio_amplifier
+      - rtsp_server.play_test_tone:
+          id: doorbell_stream
+          frequency: 1000
+          duration: 600ms
+
+sensor:
+  # Le niveau du micro, mesuré à la sortie du gain — donc exactement ce que le
+  # correspondant entendra. La lecture se lit ainsi :
+  #   -100 dBFS  : silence numérique. Le micro délivre des zéros : mauvais slot
+  #                I2S, capsule morte, gain à zéro. Aucun réglage réseau n'y fera
+  #                rien.
+  #    -60 .. -40 : ça capte, mais c'est faible. Montez `mic_gain_db` dans fdaudio.
+  #    -30 ..  -6 : niveau de parole correct.
+  #      > -3     : ça écrête. Baissez le gain.
+  - platform: template
+    name: "Niveau micro"
+    id: mic_level_sensor
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    device_class: sound_pressure
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: 'return id(doorbell_stream).mic_level_db();'
+
+  - platform: template
+    name: "Niveau haut-parleur"
+    id: speaker_level_sensor
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    device_class: sound_pressure
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: 'return id(doorbell_stream).speaker_level_db();'
+
+  # Ces deux compteurs séparent « rien n'arrive » de « ça arrive et c'est
+  # inaudible ». S'il reste à 0 pendant que vous appuyez sur parler dans Home
+  # Assistant, la voix descendante n'atteint même pas le P4 : le problème est en
+  # amont (go2rtc, backchannel non négocié), pas dans le composant.
+  - platform: template
+    name: "Paquets audio recus"
+    id: audio_rx_sensor
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).audio_packets_received();'
+
+  - platform: template
+    name: "Paquets audio envoyes"
+    id: audio_tx_sensor
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).audio_packets_sent();'
+
 switch:
   - platform: gpio
     pin: GPIO53
@@ -327,10 +458,47 @@ switch:
     id: lvgl_display_enable_switch
     restore_mode: RESTORE_DEFAULT_ON
     optimistic: true
+    # Une seule des deux tâches a le droit de dépiler les tampons V4L2. Tant que
+    # l'aperçu tourne, c'est lui ; dès qu'on l'éteint, la main revient au serveur
+    # RTSP — sans quoi plus personne ne dépile et le flux se fige sur sa dernière
+    # image, sans la moindre erreur nulle part.
     turn_on_action:
-      - lambda: 'id(camera_display).set_enabled(true);'
+      - lambda: |-
+          id(camera_display).set_enabled(true);
+          id(doorbell_stream).set_drive_camera(false);
     turn_off_action:
-      - lambda: 'id(camera_display).set_enabled(false);'
+      - lambda: |-
+          id(camera_display).set_enabled(false);
+          id(doorbell_stream).set_drive_camera(true);
+
+  # Le test décisif pour « je ne sais pas si le micro et l'audio marchent » :
+  # allumez, parlez devant la sonnette, et vous vous entendez dans son
+  # haut-parleur. Si oui, la capture, le gain, la compression G.711 et la
+  # restitution fonctionnent tous — ce qui reste à chercher est dans le réseau,
+  # go2rtc ou Home Assistant, pas dans l'appareil.
+  #
+  # C'est un test de mise au point, pas un mode à laisser allumé : micro et
+  # haut-parleur sont sur la même carte, l'effet Larsen n'est qu'une question de
+  # volume. Le backchannel est mis en pause pendant ce temps.
+  - platform: template
+    name: "Test audio (boucle micro vers haut-parleur)"
+    id: audio_loopback_switch
+    icon: mdi:microphone-message
+    entity_category: diagnostic
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    turn_on_action:
+      - switch.turn_on: audio_amplifier
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: true
+      - logger.log:
+          format: "audio: boucle locale ACTIVEE -- parlez, vous devez vous entendre"
+          level: INFO
+    turn_off_action:
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: false
 output:
   - platform: ledc
     pin: GPIO32
@@ -420,7 +588,14 @@ lvgl:
     - id: doorbell_page
       bg_color: ${col_bg}
       on_load:
-        - lambda: 'id(camera_display).configure_canvas(id(camera_canvas));'
+        # Le canvas n'existe qu'une fois la page construite, d'où le passage
+        # ici plutôt que dans `lvgl_camera_display:`. `set_enabled` est
+        # réappliqué juste après : le composant démarre désactivé, et si
+        # l'interrupteur avait déjà restauré son état ON avant que LVGL ne soit
+        # prêt, l'aperçu restait noir sans que rien ne le signale.
+        - lambda: |-
+            id(camera_display).configure_canvas(id(camera_canvas));
+            id(camera_display).set_enabled(id(lvgl_display_enable_switch).state);
       widgets:
         # ---------- Barre de titre ----------
         - obj:
@@ -482,7 +657,7 @@ lvgl:
         - label:
             id: talk_status
             x: 836
-            y: 200
+            y: 172
             hidden: true
             text: "On vous parle"
             text_color: ${col_amber}
@@ -491,8 +666,39 @@ lvgl:
         - label:
             id: client_count
             x: 836
-            y: 260
+            y: 200
             text: "0 client"
+            text_color: ${col_text2}
+            text_font: f_18
+
+        # ---------- Vumètre micro ----------
+        # La réponse visuelle à « est-ce que le micro capte quelque chose ». La
+        # barre bouge quand on parle devant la sonnette ; si elle reste plate,
+        # le défaut est ici, sur l'appareil, et rien de ce qui se règle dans
+        # Home Assistant ou go2rtc n'y changera quoi que ce soit.
+        - label:
+            x: 836
+            y: 232
+            text: "Micro"
+            text_color: ${col_text2}
+            text_font: f_18
+        - bar:
+            id: mic_bar
+            x: 836
+            y: 258
+            width: 176
+            height: 14
+            min_value: 0
+            max_value: 100
+            value: 0
+            bg_color: ${col_panel}
+            indicator:
+              bg_color: ${col_green}
+        - label:
+            id: mic_db_label
+            x: 836
+            y: 278
+            text: "—"
             text_color: ${col_text2}
             text_font: f_18
 
@@ -518,6 +724,60 @@ lvgl:
                   text_font: f_24
             on_click:
               - script.execute: ring
+
+        # ---------- Test audio ----------
+        # Le bouton qui répond, seul et sur place, à « est-ce que le micro et le
+        # haut-parleur fonctionnent ? ». Appuyez, parlez : si vous vous entendez,
+        # toute la chaîne audio de l'appareil est bonne.
+        - button:
+            id: btn_audio_test
+            x: 836
+            y: 466
+            width: 84
+            height: 60
+            bg_color: ${col_panel}
+            bg_opa: COVER
+            border_width: 1
+            border_color: ${col_text2}
+            radius: 8
+            widgets:
+              - label:
+                  id: audio_test_label
+                  align: CENTER
+                  text: "Test\nmicro"
+                  text_color: ${col_text}
+                  text_font: f_18
+            on_click:
+              - switch.toggle: audio_loopback_switch
+              - lvgl.label.update:
+                  id: audio_test_label
+                  text: !lambda |-
+                    return id(audio_loopback_switch).state ? std::string("Boucle\nON") : std::string("Test\nmicro");
+
+        # Le bip : prouve le haut-parleur tout seul, sans passer par le micro.
+        - button:
+            id: btn_beep
+            x: 928
+            y: 466
+            width: 84
+            height: 60
+            bg_color: ${col_panel}
+            bg_opa: COVER
+            border_width: 1
+            border_color: ${col_text2}
+            radius: 8
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Bip"
+                  text_color: ${col_text}
+                  text_font: f_18
+            on_click:
+              - switch.turn_on: audio_amplifier
+              - rtsp_server.play_test_tone:
+                  id: doorbell_stream
+                  frequency: 1000
+                  duration: 600ms
 
         # ---------- Ampli ----------
         # Le couper supprime le souffle au repos et, si le codec de la carte
@@ -550,6 +810,30 @@ lvgl:
                     return id(audio_amplifier).state ? std::string("Ampli ON") : std::string("Ampli OFF");
 
 interval:
+  # Le vumètre, rafraîchi assez vite pour suivre la parole. Le niveau redescend
+  # tout seul au bout d'une seconde sans son, donc une barre figée en haut veut
+  # dire « ça sature », et une barre figée en bas « ça ne capte rien ».
+  - interval: 250ms
+    then:
+      - lvgl.bar.update:
+          id: mic_bar
+          value: !lambda |-
+            // -60 dBFS -> 0 %, 0 dBFS -> 100 %. L'échelle est logarithmique
+            // exprès : en linéaire, la parole ordinaire ne décolle pas du zéro.
+            const float db = id(doorbell_stream).mic_level_db();
+            int pct = static_cast<int>((db + 60.0f) * 100.0f / 60.0f);
+            return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+      - lvgl.label.update:
+          id: mic_db_label
+          text: !lambda |-
+            if (!id(doorbell_stream).audio_running())
+              return std::string("audio arrete");
+            if (!id(doorbell_stream).mic_alive())
+              return std::string("micro muet !");
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.0f dBFS", id(doorbell_stream).mic_level_db());
+            return std::string(buf);
+
   - interval: 5s
     then:
       - lvgl.label.update:

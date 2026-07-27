@@ -64,6 +64,38 @@ else
   echo "  OK   no lambda returns a const char* ternary"
 fi
 
+# Every `id(<rtsp_server>).foo()` in an example lambda is compiled into
+# main.cpp, so a method that does not exist -- or one that was renamed in the
+# component -- breaks the user's build, not ours, and nothing here would have
+# said so. Check the call sites against the public API of rtsp_server.h.
+if python3 - "$SRC/rtsp_server.h" <<'PY'
+import glob, re, sys
+
+header = open(sys.argv[1]).read()
+public = header.split("class RTSPServer", 1)[1]
+# Everything from `public:` up to the first `protected:` is the callable API.
+public = public.split("public:", 1)[1].split("protected:", 1)[0]
+known = set(re.findall(r"\b(\w+)\s*\(", public))
+
+bad = False
+for path in sorted(glob.glob("*.yaml")):
+    text = open(path).read()
+    ids = set(re.findall(r"^\s*id:\s*(\w+)\s*$", text, re.M))
+    # Only judge calls on an id the same file declares as an rtsp_server; ids
+    # belonging to other components (camera_display, switches...) are not ours.
+    calls = [(v, m) for v, m in re.findall(r"id\((\w+)\)\.(\w+)\s*\(", text)
+             if v in ids and v == "doorbell_stream"]
+    missing = [(v, m) for v, m in calls if m not in known]
+    for var, method in missing:
+        print(f"  FAILED: {path}: id({var}).{method}() is not a public method of RTSPServer")
+    if missing:
+        bad = True
+    else:
+        print(f"  OK   {path}: {len(calls)} rtsp_server calls all resolve")
+sys.exit(1 if bad else 0)
+PY
+then :; else fail=1; fi
+
 echo
 echo "== YAML pins =="
 # A GPIO claimed twice in one config is accepted by every check above and only

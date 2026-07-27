@@ -25,7 +25,7 @@
 
 streams:
   # =====================================================================
-  # A. `codec: mjpeg` on the ESP32-P4 (the default) — TWO RTSP sessions
+  # The ESP32-P4 serves MJPEG (its only codec) — TWO RTSP sessions
   #
   # WebRTC cannot carry MJPEG. A WebRTC viewer therefore needs the video
   # transcoded to H.264, and ffmpeg only pulls: it does not carry the
@@ -40,6 +40,12 @@ streams:
   # least 3 in the ESPHome YAML (the default of 2 leaves no room for VLC or a
   # second viewer).
   #
+  # There is no H.264 alternative: the P4 cannot decode what it would encode, so
+  # the local LVGL preview and the stream could not share one camera. See the
+  # README. To simply CHECK that two-way audio works, skip the cards entirely and
+  # open go2rtc's own page — one consumer, mic button included:
+  #   http://<this host>:1984/stream.html?src=doorbell&mode=webrtc&media=video+audio+microphone
+  #
   # Add '#hardware' after '#video=h264' only if the machine has a VA-API or
   # V4L2 encoder; without one it fails outright. On a Raspberry Pi or a small
   # x86 box, expect the software transcode to cost real CPU.
@@ -50,17 +56,6 @@ streams:
   doorbell_webrtc:
     - ffmpeg:doorbell#video=h264#audio=copy
     - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=1
-
-  # =====================================================================
-  # B. `codec: h264` on the ESP32-P4 — ONE RTSP session, nothing transcoded
-  #
-  # Delete section A, uncomment this, and point the Lovelace card at
-  # `doorbell`. Note that `codec: h264` cannot share the camera with an LVGL
-  # preview (H.264 reads YUV420 from V4L2, LVGL needs RGB565), so this rules
-  # out the `camera_id:` option in the ESPHome config.
-  # =====================================================================
-  # doorbell:
-  #   - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell
 
   # Optional: for a consumer that must NOT hold the backchannel open, e.g. a
   # recorder or a motion detector running alongside the live view.

@@ -110,6 +110,43 @@ class AudioPipeline {
   uint32_t packets_received() const { return this->packets_received_; }
   uint32_t packets_dropped() const { return this->packets_dropped_; }
 
+  // ---- metering -----------------------------------------------------------
+  // "I cannot tell whether the microphone works" is the hardest fault to place
+  // in this chain, because every stage between the capsule and the browser can
+  // swallow the sound silently. These readings are taken at the two points that
+  // matter -- just after capture and just before playback -- so the device can
+  // answer the question on its own.
+
+  /// Peak level of the last capture window, 0.0 – 1.0, gain applied. Decays
+  /// over ~1 s so a template sensor polling every second sees speech peaks.
+  float mic_level() const;
+  /// The same reading in dBFS: -100.0 is digital silence, 0.0 is full scale.
+  /// Speech at a sensible level sits between -30 and -6 dBFS.
+  float mic_level_db() const;
+  /// Peak of what was last written to the speaker, 0.0 – 1.0.
+  float speaker_level() const;
+  float speaker_level_db() const;
+  /// A fixed-width text meter for the logs, e.g. "[####------]".
+  const char *mic_level_bar() const;
+  const char *speaker_level_bar() const;
+
+  /// PCM samples read from the microphone since boot. Stuck at 0 (or simply
+  /// stuck) means the source delivers nothing -- a different fault from a source
+  /// that delivers silence, and one no amount of gain will fix.
+  uint32_t mic_samples() const { return this->mic_samples_; }
+  /// True while the microphone source keeps delivering samples.
+  bool mic_alive() const;
+
+  /// Local monitoring: send the microphone straight to the speaker. Speak, hear
+  /// yourself, and both halves of the audio path are proven at once -- without
+  /// the network, go2rtc or a browser. Expect feedback if the two are close:
+  /// this is a bench test, not a mode to leave on.
+  void set_loopback(bool enabled) { this->loopback_ = enabled; }
+  bool loopback() const { return this->loopback_; }
+
+  /// Queue a beep on the speaker, to prove the output path by itself.
+  void play_test_tone(uint32_t frequency, uint32_t duration_ms);
+
  protected:
   static void capture_task_trampoline_(void *arg);
   static void playback_task_trampoline_(void *arg);
@@ -127,6 +164,15 @@ class AudioPipeline {
   /// Push 16-bit mono samples to whichever sink is active.
   void write_pcm_(const int16_t *src, size_t samples);
   void on_external_mic_data_(const std::vector<uint8_t> &data);
+
+  /// Record the peak of a PCM block into a decaying meter.
+  static void update_peak_(volatile uint32_t *peak, volatile int64_t *stamp, const int16_t *pcm, size_t samples);
+  /// Read a decaying meter back as 0.0 – 1.0.
+  static float read_peak_(volatile uint32_t peak, volatile int64_t stamp);
+  /// Fill `dst` (>= 13 bytes) with a "[####------]" meter for `level`.
+  static void render_bar_(char *dst, float level);
+  /// Append one buffer's worth of test tone to the playback path, if pending.
+  size_t take_test_tone_(int16_t *dst, size_t samples);
 
   Config config_;
   AudioCallback callback_;
@@ -152,6 +198,27 @@ class AudioPipeline {
   volatile uint32_t packets_sent_{0};
   volatile uint32_t packets_received_{0};
   volatile uint32_t packets_dropped_{0};
+
+  /// Peak meters, held as plain 32-bit words so any task can read them without
+  /// a lock: the writer is a single task and a torn read is not possible.
+  volatile uint32_t mic_peak_{0};
+  volatile int64_t mic_peak_us_{0};
+  volatile uint32_t speaker_peak_{0};
+  volatile int64_t speaker_peak_us_{0};
+
+  volatile uint32_t mic_samples_{0};
+  volatile int64_t mic_last_sample_us_{0};
+
+  volatile bool loopback_{false};
+  /// Remaining samples of the pending beep, and its phase state.
+  volatile uint32_t tone_remaining_{0};
+  uint32_t tone_frequency_{1000};
+  uint32_t tone_phase_{0};
+
+  /// Rendered lazily by mic_level_bar() / speaker_level_bar(), which are only
+  /// ever called from the logging path.
+  mutable char mic_bar_[16]{};
+  mutable char speaker_bar_[16]{};
 
   uint32_t rtp_timestamp_{0};
 };

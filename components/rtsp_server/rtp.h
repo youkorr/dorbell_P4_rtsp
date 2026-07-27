@@ -16,7 +16,7 @@ static constexpr size_t INTERLEAVED_HEADER_SIZE = 4;
 /// Logical streams advertised in the SDP. The order matters: it is the order the
 /// media descriptions appear in, which is what clients use to derive track IDs.
 enum class StreamKind : uint8_t {
-  VIDEO = 0,        ///< H.264, server -> client
+  VIDEO = 0,        ///< MJPEG, server -> client
   AUDIO = 1,        ///< G.711, server -> client (microphone)
   BACKCHANNEL = 2,  ///< G.711, client -> server (speaker, ONVIF backchannel)
 };
@@ -36,39 +36,6 @@ class RtpSender {
 /// Write a 12-byte RTP header at `dst`.
 void write_rtp_header(uint8_t *dst, uint8_t payload_type, bool marker, uint16_t seq, uint32_t timestamp,
                       uint32_t ssrc);
-
-/// One NAL unit inside an Annex-B byte stream (start codes already stripped).
-struct AnnexBNal {
-  const uint8_t *data;
-  size_t size;
-};
-
-/// Iterate the NAL units of an Annex-B buffer.
-///
-/// `pos` must start at 0 and is advanced across calls. Returns false once the
-/// buffer is exhausted.
-bool next_annexb_nal(const uint8_t *buf, size_t len, size_t *pos, AnnexBNal *out);
-
-/// Packetizes H.264 access units per RFC 6184 (single NAL unit mode + FU-A).
-class H264Packetizer {
- public:
-  H264Packetizer(size_t max_packet_size, uint8_t payload_type, uint32_t ssrc);
-
-  /// Split one Annex-B access unit into RTP packets and push them to `sink`.
-  /// The marker bit is set on the last packet of the access unit.
-  void packetize(const uint8_t *au, size_t au_len, uint32_t timestamp, RtpSender *sink);
-
-  uint32_t ssrc() const { return this->ssrc_; }
-
- private:
-  void emit_nal_(const AnnexBNal &nal, uint32_t timestamp, bool last_in_au, RtpSender *sink);
-
-  std::vector<uint8_t> buf_;
-  size_t max_packet_size_;
-  uint8_t payload_type_;
-  uint32_t ssrc_;
-  uint16_t seq_{0};
-};
 
 /// Everything RFC 2435 needs from a JFIF frame.
 struct JpegInfo {
@@ -125,7 +92,7 @@ class G711Packetizer {
   uint16_t seq_{0};
 };
 
-/// Base64 encoder used for the SDP `sprop-parameter-sets` attribute.
+/// Base64 encoder used for the RTSP `Authorization: Basic` credentials.
 std::string base64_encode(const uint8_t *data, size_t len);
 
 }  // namespace rtsp_server

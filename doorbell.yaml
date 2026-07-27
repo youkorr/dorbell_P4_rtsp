@@ -22,11 +22,11 @@ esp32:
   variant: esp32p4
   framework:
     type: esp-idf
-    # The MIPI-CSI stack, the hardware H.264 encoder and the new I2S driver all
+    # The MIPI-CSI stack, the hardware JPEG encoder and the new I2S driver all
     # need a recent IDF.
     version: 5.4.0
     sdkconfig_options:
-      # H.264 frame buffers and the camera buffers live in PSRAM.
+      # The camera and JPEG buffers live in PSRAM.
       CONFIG_SPIRAM: y
       CONFIG_SPIRAM_MODE_HEX: y
       CONFIG_SPIRAM_SPEED_200M: y
@@ -36,19 +36,18 @@ esp32:
       CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
       CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
 
-# NOTE: `rtsp_server` et l'option `enable_h264` d'esp_video vivent pour l'instant
-# sur la branche de travail ci-dessous. Une fois la PR fusionnee, remplacez ces
-# deux `ref:` par `main`.
+# NOTE: `rtsp_server` vit pour l'instant sur la branche de travail ci-dessous.
+# Une fois la PR fusionnee, remplacez ces deux `ref:` par `main`.
 external_components:
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
-      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [rtsp_server]
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
-      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [esp_video]
 
 logger:
@@ -92,10 +91,8 @@ esp_video:
   xclk_pin: GPIO36 # -1 if your board has its own 24 MHz oscillator
   xclk_freq: 24000000
   enable_isp: true # RAW -> RGB565 conversion, feeds the JPEG encoder
-  # MJPEG uses the ESP-IDF hardware JPEG driver directly, so neither
-  # enable_jpeg (/dev/video10) nor enable_h264 (/dev/video11) is required.
-  # Set enable_h264: true only if you switch rtsp_server to `codec: h264`.
-  enable_h264: false
+  # MJPEG uses the ESP-IDF hardware JPEG driver directly, so enable_jpeg
+  # (/dev/video10) is not required either.
 
 # ---------------------------------------------------------------------------
 # RTSP server (video + two-way audio)
@@ -112,18 +109,11 @@ rtsp_server:
   max_clients: 3
 
   video:
-    codec: mjpeg # hardware JPEG encoder; H.264 is an option, see below
+    # MJPEG only. The P4 has a hardware H.264 encoder, but nothing on the chip
+    # decodes H.264 back, and the encoder consumes YUV420 while an LVGL preview
+    # needs RGB565 -- so a screen and the stream could not share one camera.
     framerate: 15
     jpeg_quality: 25 # 1..100; ~25 keeps a frame around 40-60 kB
-    # --- Option H.264 (test) -------------------------------------------------
-    # Halves the bandwidth and lets go2rtc hand the stream to WebRTC without
-    # transcoding. Needs `enable_h264: true` on esp_video above, and a sensor
-    # resolution whose width AND height are multiples of 16.
-    # codec: h264
-    # bitrate: 1500000   # the hardware encoder caps at 2.5 Mbps
-    # gop: 15            # one key frame per second -> clients start fast
-    # min_qp: 25
-    # max_qp: 40
 
   audio:
     codec: pcmu # G.711 µ-law: no transcoding anywhere in the chain
@@ -164,10 +154,24 @@ rtsp_server:
 # Doorbell button, chime and indicators — ordinary ESPHome
 # ---------------------------------------------------------------------------
 
+# The entity Home Assistant understands natively as a doorbell: it shows up as
+# `event.<device>_sonnette`, its state is the timestamp of the last press, and
+# it can be picked straight out of the automation editor as a trigger. A bare
+# binary_sensor cannot do any of that -- nothing in Home Assistant reacts to one
+# on its own, and a short pulse is easy to miss entirely.
+event:
+  - platform: template
+    id: doorbell_event
+    name: "Sonnette"
+    device_class: doorbell
+    event_types:
+      - pressed
+
 binary_sensor:
   - platform: gpio
     id: doorbell_button
     name: "Bouton"
+    device_class: occupancy
     pin:
       number: GPIO32
       mode:
@@ -180,8 +184,29 @@ binary_sensor:
     on_press:
       # Ring the local chime, then let Home Assistant do the notification.
       - switch.turn_on: chime_relay
+      # Three ways out, so the press cannot be missed: the event entity, a raw
+      # bus event for YAML automations, and this binary_sensor's own state.
+      - event.trigger:
+          id: doorbell_event
+          event_type: pressed
+      - homeassistant.event:
+          event: esphome.doorbell_pressed
+          data:
+            device: ${name}
       - delay: 1s
       - switch.turn_off: chime_relay
+
+  - platform: template
+    name: "Micro actif"
+    device_class: problem
+    entity_category: diagnostic
+    # Reversed on purpose: ON means there IS a problem, i.e. the microphone
+    # source has stopped delivering samples altogether.
+    lambda: 'return !id(doorbell_stream).mic_alive();'
+  - platform: template
+    name: "On vous parle"
+    entity_category: diagnostic
+    lambda: 'return id(doorbell_stream).is_talking();'
 
 switch:
   - platform: gpio
@@ -196,6 +221,28 @@ switch:
     id: amp_enable
     pin: GPIO28
     restore_mode: ALWAYS_OFF
+
+  # Speak in front of the doorbell and you hear yourself: capture, gain, G.711
+  # and playback are all proven at once, with no network and nobody at the other
+  # end. A bench test, not a mode to leave on -- microphone and speaker sit on
+  # the same board and feedback is only a matter of volume.
+  - platform: template
+    name: "Test audio (boucle micro vers haut-parleur)"
+    id: audio_loopback_switch
+    icon: mdi:microphone-message
+    entity_category: diagnostic
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    turn_on_action:
+      - switch.turn_on: amp_enable
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: true
+    turn_off_action:
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: false
+      - switch.turn_off: amp_enable
 
 light:
   - platform: status_led
@@ -214,3 +261,45 @@ sensor:
     lambda: 'return id(doorbell_stream).client_count();'
     update_interval: 10s
     accuracy_decimals: 0
+
+  # The microphone, measured rather than assumed. Read it like this:
+  #   -100 dBFS   digital silence -- the source delivers zeros. Wrong I2S slot,
+  #               dead capsule, gain at zero. No network setting will fix it.
+  #   -60 .. -40  it hears, but faintly: raise `gain` in the audio block.
+  #   -30 ..  -6  a healthy speech level.
+  #      > -3     clipping: lower the gain.
+  - platform: template
+    name: "Niveau micro"
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    device_class: sound_pressure
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: 'return id(doorbell_stream).mic_level_db();'
+
+  # Stuck at 0 while you press talk in Home Assistant means the downstream voice
+  # never reaches the P4 at all: the fault is upstream (go2rtc, or a backchannel
+  # that was never negotiated), not in this component.
+  - platform: template
+    name: "Paquets audio recus"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).audio_packets_received();'
+
+button:
+  # Proves the speaker on its own: no beep, no point looking at Home Assistant.
+  - platform: template
+    name: "Bip de test"
+    icon: mdi:volume-high
+    entity_category: diagnostic
+    on_press:
+      - switch.turn_on: amp_enable
+      - rtsp_server.play_test_tone:
+          id: doorbell_stream
+          frequency: 1000
+          duration: 600ms
+      - delay: 1s
+      - switch.turn_off: amp_enable

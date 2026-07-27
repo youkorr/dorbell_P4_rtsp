@@ -2,8 +2,7 @@
 
 Video is captured either from a shared `esp_cam_sensor` camera (so a board with a
 screen can preview and stream at the same time) or straight from the `esp_video`
-V4L2 device, and encoded by the ESP32-P4's hardware JPEG engine (MJPEG, the
-default) or its hardware H.264 encoder.
+V4L2 device, and encoded as MJPEG by the ESP32-P4's hardware JPEG engine.
 
 Audio is captured and played back either through ESPHome `microphone` / `speaker`
 platforms (fdaudio, i2s_audio, ...) or through raw I2S pins, and companded to
@@ -28,7 +27,6 @@ RTSPServer = rtsp_server_ns.class_("RTSPServer", cg.Component)
 VideoConfig = rtsp_server_ns.namespace("VideoPipeline").struct("Config")
 AudioConfig = rtsp_server_ns.namespace("AudioPipeline").struct("Config")
 
-VideoCodec = rtsp_server_ns.enum("VideoCodec", is_class=True)
 AudioCodec = rtsp_server_ns.enum("AudioCodec", is_class=True)
 MicMode = rtsp_server_ns.enum("MicMode", is_class=True)
 
@@ -41,6 +39,9 @@ ClientConnectedTrigger = rtsp_server_ns.class_("ClientConnectedTrigger", automat
 ClientDisconnectedTrigger = rtsp_server_ns.class_("ClientDisconnectedTrigger", automation.Trigger.template())
 TalkStartTrigger = rtsp_server_ns.class_("TalkStartTrigger", automation.Trigger.template())
 TalkEndTrigger = rtsp_server_ns.class_("TalkEndTrigger", automation.Trigger.template())
+
+SetLoopbackAction = rtsp_server_ns.class_("SetLoopbackAction", automation.Action)
+PlayTestToneAction = rtsp_server_ns.class_("PlayTestToneAction", automation.Action)
 
 # All configuration keys are declared here rather than imported from
 # esphome.const, so that a rename upstream cannot break this component.
@@ -56,13 +57,8 @@ CONF_CODEC = "codec"
 CONF_CAMERA_ID = "camera_id"
 CONF_DRIVE_CAMERA = "drive_camera"
 CONF_DEVICE = "device"
-CONF_ENCODER_DEVICE = "encoder_device"
 CONF_FRAMERATE = "framerate"
 CONF_JPEG_QUALITY = "jpeg_quality"
-CONF_BITRATE = "bitrate"
-CONF_GOP = "gop"
-CONF_MIN_QP = "min_qp"
-CONF_MAX_QP = "max_qp"
 CONF_BUFFER_COUNT = "buffer_count"
 CONF_VFLIP = "vflip"
 CONF_HFLIP = "hflip"
@@ -91,10 +87,9 @@ CONF_ON_CLIENT_DISCONNECTED = "on_client_disconnected"
 CONF_ON_TALK_START = "on_talk_start"
 CONF_ON_TALK_END = "on_talk_end"
 
-VIDEO_CODECS = {
-    "mjpeg": VideoCodec.MJPEG,
-    "h264": VideoCodec.H264,
-}
+CONF_STATE = "state"
+CONF_FREQUENCY = "frequency"
+CONF_DURATION = "duration"
 
 AUDIO_CODECS = {
     "pcmu": AudioCodec.PCMU,
@@ -145,9 +140,26 @@ def _validate_path(value):
     return value
 
 
+def _validate_codec(value):
+    """`codec:` used to select between MJPEG and H.264; only MJPEG is left.
+
+    Accepted rather than rejected as an unknown key, so an existing config keeps
+    working, but 'codec: h264' has to say why it is gone instead of silently
+    producing an MJPEG stream the user did not ask for.
+    """
+    value = cv.string(value).lower()
+    if value == "mjpeg":
+        return value
+    raise cv.Invalid(
+        "the only video codec is 'mjpeg'. H.264 was removed: the ESP32-P4 can encode it but cannot decode "
+        "it back for the LVGL preview, and its encoder consumes YUV420 while LVGL needs RGB565 — so the "
+        "screen and the stream could not share one camera. Drop the 'codec:' key."
+    )
+
+
 VIDEO_SCHEMA = cv.Schema(
     {
-        cv.Optional(CONF_CODEC, default="mjpeg"): cv.enum(VIDEO_CODECS, lower=True),
+        cv.Optional(CONF_CODEC): _validate_codec,
         # Share an esp_cam_sensor camera (its RGB565 frames also feed LVGL).
         # Omit it to open the V4L2 device directly, for a headless build.
         cv.Optional(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
@@ -155,32 +167,14 @@ VIDEO_SCHEMA = cv.Schema(
         # one consumer dequeues V4L2 buffers.
         cv.Optional(CONF_DRIVE_CAMERA, default=True): cv.boolean,
         cv.Optional(CONF_DEVICE, default="/dev/video0"): cv.string,
-        cv.Optional(CONF_ENCODER_DEVICE, default="/dev/video11"): cv.string,
         cv.Optional(CONF_FRAMERATE, default=15): cv.int_range(min=1, max=30),
-        # MJPEG: 1 (worst) to 100 (best). ~25 keeps a 1280x960 frame near 60 kB.
+        # 1 (worst) to 100 (best). ~25 keeps a 1280x960 frame near 60 kB.
         cv.Optional(CONF_JPEG_QUALITY, default=25): cv.int_range(min=1, max=100),
-        # H.264 only. The ESP32-P4 hardware encoder tops out at 2.5 Mbps.
-        cv.Optional(CONF_BITRATE, default=1500000): cv.int_range(min=25000, max=2500000),
-        cv.Optional(CONF_GOP, default=15): cv.int_range(min=1, max=120),
-        cv.Optional(CONF_MIN_QP, default=25): cv.int_range(min=1, max=51),
-        cv.Optional(CONF_MAX_QP, default=40): cv.int_range(min=1, max=51),
         cv.Optional(CONF_BUFFER_COUNT, default=2): cv.int_range(min=2, max=4),
         cv.Optional(CONF_VFLIP, default=False): cv.boolean,
         cv.Optional(CONF_HFLIP, default=False): cv.boolean,
     }
 )
-
-
-def _validate_video(config):
-    if _selected(config[CONF_CODEC]) == "h264" and CONF_CAMERA_ID in config:
-        raise cv.Invalid(
-            "'codec: h264' reads YUV420 straight from the V4L2 device and cannot share an "
-            "esp_cam_sensor camera (which delivers RGB565). Remove 'camera_id', or use 'codec: mjpeg'."
-        )
-    return config
-
-
-VIDEO_SCHEMA = cv.All(VIDEO_SCHEMA, _validate_video)
 
 MICROPHONE_SCHEMA = cv.Schema(
     {
@@ -318,25 +312,58 @@ def _final_validate(config):
     """The V4L2 devices this component opens are created by `esp_video`."""
     full_config = fv.full_config.get()
 
-    esp_video = full_config.get("esp_video")
-    if esp_video is None:
+    if full_config.get("esp_video") is None:
         raise cv.Invalid(
             "the 'rtsp_server' component needs the 'esp_video' component to bring up the MIPI-CSI camera; "
             "add an 'esp_video:' block"
         )
-
-    if _selected(config[CONF_VIDEO][CONF_CODEC]) == "h264":
-        # esp_video only builds /dev/video11 when it is asked to.
-        entries = esp_video if isinstance(esp_video, list) else [esp_video]
-        if not any(entry.get("enable_h264") for entry in entries if isinstance(entry, dict)):
-            raise cv.Invalid(
-                "'codec: h264' needs the hardware H.264 encoder device (/dev/video11); "
-                "set 'enable_h264: true' on the 'esp_video' component"
-            )
     return config
 
 
 FINAL_VALIDATE_SCHEMA = _final_validate
+
+
+# ---------------------------------------------------------------------------
+# Actions
+#
+# Both exist to answer "does the audio work?" from the device itself, without
+# go2rtc, a browser or a second person at the other end.
+# ---------------------------------------------------------------------------
+
+
+@automation.register_action(
+    "rtsp_server.set_loopback",
+    SetLoopbackAction,
+    cv.maybe_simple_value(
+        {
+            cv.GenerateID(): cv.use_id(RTSPServer),
+            cv.Required(CONF_STATE): cv.templatable(cv.boolean),
+        },
+        key=CONF_STATE,
+    ),
+)
+async def set_loopback_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg, await cg.get_variable(config[CONF_ID]))
+    cg.add(var.set_state(await cg.templatable(config[CONF_STATE], args, bool)))
+    return var
+
+
+@automation.register_action(
+    "rtsp_server.play_test_tone",
+    PlayTestToneAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(RTSPServer),
+            cv.Optional(CONF_FREQUENCY, default=1000): cv.templatable(cv.int_range(min=100, max=4000)),
+            cv.Optional(CONF_DURATION, default="500ms"): cv.positive_time_period_milliseconds,
+        }
+    ),
+)
+async def play_test_tone_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg, await cg.get_variable(config[CONF_ID]))
+    cg.add(var.set_frequency(await cg.templatable(config[CONF_FREQUENCY], args, cg.uint32)))
+    cg.add(var.set_duration(config[CONF_DURATION].total_milliseconds))
+    return var
 
 
 async def to_code(config):
@@ -356,15 +383,9 @@ async def to_code(config):
         var.set_video_config(
             cg.StructInitializer(
                 VideoConfig,
-                ("codec", video[CONF_CODEC]),
                 ("device", video[CONF_DEVICE]),
-                ("encoder_device", video[CONF_ENCODER_DEVICE]),
                 ("framerate", video[CONF_FRAMERATE]),
                 ("jpeg_quality", video[CONF_JPEG_QUALITY]),
-                ("bitrate", video[CONF_BITRATE]),
-                ("gop", video[CONF_GOP]),
-                ("min_qp", video[CONF_MIN_QP]),
-                ("max_qp", video[CONF_MAX_QP]),
                 ("buffer_count", video[CONF_BUFFER_COUNT]),
                 ("vflip", video[CONF_VFLIP]),
                 ("hflip", video[CONF_HFLIP]),

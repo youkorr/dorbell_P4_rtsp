@@ -44,6 +44,38 @@ class TalkEndTrigger : public Trigger<> {
   }
 };
 
+/// `rtsp_server.set_loopback` — route the microphone to the speaker locally.
+///
+/// The bench test for "is the audio working at all": press it, speak, and if
+/// you hear yourself then capture, gain, companding and playback are all fine
+/// and any remaining fault is in the network or in Home Assistant.
+template<typename... Ts> class SetLoopbackAction : public Action<Ts...> {
+ public:
+  explicit SetLoopbackAction(RTSPServer *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(bool, state)
+
+  void play(Ts... x) override { this->parent_->set_audio_loopback(this->state_.value(x...)); }
+
+ protected:
+  RTSPServer *parent_;
+};
+
+/// `rtsp_server.play_test_tone` — beep on the speaker, to prove the output
+/// path on its own when the loopback test says nothing.
+template<typename... Ts> class PlayTestToneAction : public Action<Ts...> {
+ public:
+  explicit PlayTestToneAction(RTSPServer *parent) : parent_(parent) {}
+  TEMPLATABLE_VALUE(uint32_t, frequency)
+  TEMPLATABLE_VALUE(uint32_t, duration)
+
+  void play(Ts... x) override {
+    this->parent_->play_test_tone(this->frequency_.value(x...), this->duration_.value(x...));
+  }
+
+ protected:
+  RTSPServer *parent_;
+};
+
 }  // namespace rtsp_server
 }  // namespace esphome
 

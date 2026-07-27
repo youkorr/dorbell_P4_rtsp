@@ -164,21 +164,18 @@ push-to-talk) il faut pointer sur le flux **transcodé** déclaré dans
 
 | Codec sur le P4 | Flux go2rtc à utiliser dans la carte | Transcodage |
 |---|---|---|
-| `mjpeg` (défaut) | `doorbell_webrtc` | vidéo ré-encodée en H.264 par ffmpeg ; **audio copié tel quel** |
-| `h264` (option) | `doorbell` | aucun |
+| MJPEG (le seul) | `doorbell_webrtc` | vidéo ré-encodée en H.264 par ffmpeg ; **audio copié tel quel** |
 
 Le backchannel n'est jamais transcodé : dans les deux cas le G.711 traverse la
 chaîne intact, donc le push-to-talk se comporte pareil. Seul le coût CPU sur la
 machine Home Assistant change.
 
-Dans les exemples ci-dessous, remplacez `doorbell_webrtc` par `doorbell` si vous
-êtes passé en `codec: h264`.
-
 > **Le mode d'affichage MJPEG ne transporte aucun son.** MJPEG est un format
 > vidéo seul : une carte réglée sur `modes: [mjpeg]` donnera l'image sans jamais
 > le micro, quel que soit l'état du backchannel côté RTSP. Pour entendre la
 > sonnette il faut `modes: [webrtc]`, donc de la vidéo H.264 — d'où le
-> transcodage ci-dessus. Et dans le lecteur, pensez à couper le mute : les
+> transcodage ci-dessus, que le P4 ne peut pas éviter puisqu'il n'émet que du
+> MJPEG (voir le §4 ter). Et dans le lecteur, pensez à couper le mute : les
 > navigateurs démarrent muets tant qu'on n'a pas cliqué.
 
 ### Vérifier que go2rtc reçoit bien le flux
@@ -245,7 +242,7 @@ C'est la mise en œuvre la plus directe du push-to-talk :
 
 ```yaml
 type: custom:webrtc-camera
-url: doorbell_webrtc     # 'doorbell' si le P4 est en codec: h264
+url: doorbell_webrtc
 mode: webrtc             # seul mode qui gère l'audio bidirectionnel
 media: video,audio,microphone
 muted: false
@@ -280,50 +277,55 @@ Le bloc d'état du P4 la rend visible d'un coup d'œil :
 clients=2 playing=2 | negotiated: video=NO audio=yes backchannel=NO
 ```
 
-### La sortie : H.264 sur le P4
+### La sortie qui n'existe plus : H.264
 
-En `codec: h264`, la vidéo est déjà dans le format que WebRTC attend. Plus de
-transcodage, donc plus de seconde source :
+Les versions précédentes de cette page proposaient ici `codec: h264` : la vidéo
+arrivait déjà dans le format attendu par WebRTC, plus de transcodage, donc une
+seule source et le bouton micro apparaissait.
 
-```yaml
-go2rtc:
-  streams:
-    doorbell:
-      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell
-```
+**Cette option a été retirée du composant**, et il faut être franc sur ce que
+cela coûte : *si votre objectif est le push-to-talk depuis l'Advanced Camera
+Card, c'était le seul chemin, et il n'y en a plus.* La raison du retrait :
 
-Une source, un consommateur, le backchannel porté par la même connexion. Le
-bouton micro apparaît. Et les saccades disparaissent avec le transcodage, qui
-en était la cause.
+- le P4 encode le H.264 mais ne le décode pas — l'aperçu local sur son écran
+  était donc impossible dans ce mode ;
+- son encodeur consomme du YUV420 quand LVGL affiche du RGB565 : une seule
+  caméra ne peut pas alimenter les deux, il fallait choisir entre l'écran et le
+  flux.
 
-Côté ESPHome :
+L'aperçu sur l'écran du P4 a été jugé plus important que le bouton micro d'une
+carte particulière. `codec: h264` est maintenant refusé à la validation, avec ce
+message, plutôt que de servir du MJPEG en silence.
 
-```yaml
-esp_video:
-  enable_h264: true
+### Ce qui marche quand même pour parler
 
-rtsp_server:
-  video:
-    codec: h264
-    bitrate: 1500000
-    gop: 15
-```
+Le backchannel du composant fonctionne : ce qui coince est la carte, pas
+l'appareil. Trois façons de s'en servir, par ordre de simplicité :
 
-**Ce que cela coûte** : `codec: h264` lit du YUV420 directement sur le
-périphérique V4L2 et ne peut donc pas partager la caméra avec `lvgl_camera_display`,
-qui a besoin de RGB565. **Vous perdez l'aperçu local sur l'écran.** Le composant
-refuse d'ailleurs la combinaison à la validation.
+1. **La page de go2rtc elle-même.** C'est le chemin le plus direct, et celui à
+   essayer en premier pour vérifier que la voix descendante passe de bout en
+   bout :
 
-La résolution doit aussi être un multiple de 16 sur les deux axes — 800x640
-convient, 800x600 non.
+   ```
+   http://ADRESSE_HA:1984/stream.html?src=doorbell&mode=webrtc&media=video+audio+microphone
+   ```
 
-| | MJPEG + aperçu LVGL | H.264 sans aperçu |
-|---|---|---|
-| Image dans la carte | fluide en mode `mjpeg` | fluide en `webrtc` |
-| Son descendant | non (MJPEG n'a pas d'audio) | oui |
-| Push-to-talk | **impossible** | oui |
-| Aperçu sur l'écran du P4 | oui | non |
-| Charge CPU côté Home Assistant | transcodage permanent | nulle |
+   Un seul consommateur, le bouton micro y est, et il n'y a ni carte ni HTTPS à
+   satisfaire. Elle s'intègre dans un tableau de bord avec une carte `iframe`.
+
+2. **La carte WebRTC Camera (AlexxIT)** en `mode: webrtc` avec
+   `media: video,audio,microphone` — voir le §4 plus haut.
+
+3. **Les tests embarqués**, pour séparer une panne d'appareil d'une panne de
+   chaîne : le bouton « Bip de test » prouve le haut-parleur, l'interrupteur
+   « Test audio (boucle micro vers haut-parleur) » prouve le micro *et* le
+   haut-parleur d'un coup. Détails dans le README.
+
+Et pour savoir, sans quitter Home Assistant, si la voix descendante atteint
+vraiment le P4 : le capteur **« Paquets audio recus »**. S'il reste à 0 pendant
+que vous appuyez sur parler, rien n'arrive à l'appareil et c'est en amont qu'il
+faut chercher. S'il monte et que vous n'entendez rien, le problème est l'ampli
+ou le volume.
 
 ## 4 bis. Les sept conditions du push-to-talk (Advanced Camera Card)
 
@@ -382,7 +384,7 @@ cameras:
     live_provider: go2rtc
     go2rtc:
       url: http://192.168.1.10:1984
-      stream: doorbell_webrtc   # 'doorbell' si le P4 est en codec: h264
+      stream: doorbell_webrtc
       modes:
         - webrtc          # seul mode compatible audio bidirectionnel
 live:
@@ -417,26 +419,58 @@ souvent, parce que tout le reste de la chaîne a l'air de fonctionner.
 > notifie sur **détection d'objet** et demande un abonnement depuis l'interface
 > de Frigate. Il ne connaît pas le bouton de la sonnette.
 
-### Trouver les deux identifiants
+### Trois déclencheurs possibles — prenez le premier
 
-Les deux lignes qui échouent silencieusement si elles sont fausses :
+La sonnette expose l'appui de trois façons (voir le README). Pour une
+automatisation, le premier est de loin le meilleur :
 
-- **`entity_id` du capteur.** ESPHome le construit à partir du nom de
+| Déclencheur | Pourquoi |
+|---|---|
+| **entité `event`** | c'est l'entité sonnette **native** de Home Assistant. Elle porte un horodatage, se choisit dans l'éditeur graphique, et un appui ne peut pas être manqué. |
+| entité `binary_sensor` | pour les conditions et les cartes. Tenue 5 s, donc visible à l'œil dans Outils de développement → États. |
+| évènement `esphome.doorbell_pressed` | déclencheur brut, si vous préférez ne dépendre d'aucune entité. |
+
+```yaml
+# Recommandé : l'entité `event`.
+automation:
+  - alias: Sonnette - notification
+    trigger:
+      - platform: state
+        entity_id: event.doorbell_p4_lvgl_sonnette
+    ...
+
+# Variante : l'évènement de bus, si vous ne voulez pas chercher un entity_id.
+    trigger:
+      - platform: event
+        event_type: esphome.doorbell_pressed
+```
+
+### Trouver les identifiants
+
+Les lignes qui échouent silencieusement si elles sont fausses :
+
+- **`entity_id` de l'entité.** ESPHome le construit à partir du nom de
   l'appareil, pas du `friendly_name` que vous croyez : selon la configuration
-  cela donne `binary_sensor.doorbell_lvgl_bouton` ou
-  `binary_sensor.doorbell_p4_bouton`. Lisez-le dans **Outils de développement →
-  États** en filtrant sur `bouton`, et copiez-le tel quel.
+  cela donne `event.doorbell_p4_lvgl_sonnette` ou `event.doorbell_p4_sonnette`.
+  Lisez-le dans **Outils de développement → États** en filtrant sur `sonnette`,
+  et copiez-le tel quel. Idem pour `binary_sensor...._bouton`.
 - **Le service de notification.** Il vaut `notify.mobile_app_<nom-du-mobile>`.
   La liste exacte est dans **Outils de développement → Actions**, en tapant
   `notify.`.
+
+> **Vérifier que l'appui arrive, avant d'écrire quoi que ce soit.** Ouvrez
+> **Outils de développement → États**, filtrez sur `sonnette`, et appuyez sur le
+> bouton du P4 : l'horodatage de l'entité `event` doit changer. S'il ne bouge
+> pas, l'automatisation n'est pas en cause — regardez `esphome logs`, la ligne
+> `ring: sequence declenchee` vous dira si l'appui tactile a seulement atteint le
+> script.
 
 ```yaml
 automation:
   - alias: Sonnette - notification
     trigger:
       - platform: state
-        entity_id: binary_sensor.doorbell_lvgl_bouton
-        to: "on"
+        entity_id: event.doorbell_p4_lvgl_sonnette
     action:
       - action: notify.mobile_app_telephone
         data:
@@ -487,7 +521,7 @@ views:
 2. Sur le flux `doorbell`, cliquez **probe**. Vous devez voir **trois** pistes :
 
    ```
-   video, recvonly, JPEG          (H264 si le P4 est en codec: h264)
+   video, recvonly, JPEG
    audio, recvonly, PCMU/8000
    audio, sendonly, PCMU/8000     <-- le backchannel
    ```
@@ -499,6 +533,40 @@ views:
 3. Passez `log: {rtsp: trace}` dans go2rtc et relancez : la requête `DESCRIBE`
    doit porter l'en-tête `Require: www.onvif.org/ver20/backchannel`, et le SDP
    renvoyé par le P4 doit contenir `a=sendonly`.
+
+## 7 bis. « Je ne sais pas si le micro et l'audio fonctionnent »
+
+Ne cherchez pas dans Home Assistant en premier : l'appareil sait répondre tout
+seul, et cela sépare en deux minutes une panne de matériel d'une panne de
+chaîne. Dans l'ordre :
+
+1. **Bip de test** — bouton `Bip de test` dans Home Assistant, ou le bouton
+   « Bip » sur l'écran du P4. Pas de bip ⇒ le problème est le haut-parleur, pas
+   le réseau : ampli coupé, `speaker_id` absent, volume à zéro.
+2. **Boucle locale** — interrupteur `Test audio (boucle micro vers
+   haut-parleur)`, ou le bouton « Test micro » sur l'écran. Parlez devant la
+   sonnette : vous devez vous entendre. Si oui, **toute la chaîne audio de
+   l'appareil est bonne** et ce qui reste est en amont.
+3. **Vumètre** — le capteur `Niveau micro` (en dBFS) et la barre sur l'écran du
+   P4. Il descend à −100 dBFS au silence et remonte quand on parle.
+
+Comment lire le niveau :
+
+| Lecture | Diagnostic |
+|---|---|
+| `Micro actif` en défaut | la source ne délivre **plus rien** : mauvais `microphone_id`, codec non démarré, broches I2S fausses |
+| −100 dBFS alors que vous parlez | la source délivre du **silence** : mauvais slot I2S, capsule morte, gain à zéro |
+| −60 à −40 dBFS | ça capte mais faiblement : montez `mic_gain_db` (fdaudio) ou `gain:` |
+| −30 à −6 dBFS | niveau correct |
+| au-dessus de −3 dBFS | ça écrête, baissez le gain |
+
+Et pour la voix **descendante** (Home Assistant → sonnette), le capteur
+`Paquets audio recus` tranche à lui seul :
+
+| Compteur pendant que vous appuyez sur parler | Où est le défaut |
+|---|---|
+| reste à 0 | rien n'atteint le P4 : backchannel non négocié, ou go2rtc — voir le §7 |
+| il monte, mais on n'entend rien | l'appareil reçoit bien : ampli coupé, volume, ou haut-parleur (faites le bip de test) |
 
 ## 8. Diagnostic
 
@@ -515,9 +583,12 @@ views:
 | Bouton micro absent ou inerte | Home Assistant en HTTP → passez en HTTPS |
 | Image OK, aucun son montant | pas de `microphone` dans `media` (webrtc-camera) |
 | Image OK, on ne peut pas parler | backchannel non négocié → étape 7 |
+| On ne sait pas si le micro capte | faites la boucle locale et lisez `Niveau micro` → étape 7 bis |
+| `Paquets audio recus` reste à 0 quand on parle | la voix descendante n'atteint pas le P4 : le défaut est en amont, pas dans l'appareil |
+| L'image se fige alors que le flux est actif | l'aperçu LVGL a été coupé sans rendre le dequeue V4L2 au serveur — l'interrupteur « Aperçu caméra locale » de `doorbell-lvgl.yaml` le fait, une config maison doit appeler `set_drive_camera(true)` |
+| `codec: h264` refusé à la compilation | voulu : le H.264 a été retiré, voir le §4 ter |
 | Le son se coupe quand on parle | normal : `half_duplex: true` coupe le micro pendant l'émission |
 | Larsen | l'ampli reste alimenté : câblez la broche `SD` (voir `docs/hardware.md`) |
-| Image saccadée ou verte au démarrage (H.264) | le client attend la première trame clé — au plus `gop / framerate` secondes |
-| Image fluide mais CPU élevé sur la machine HA | transcodage MJPEG → H.264 ; passez le P4 en `codec: h264` |
+| Image fluide mais CPU élevé sur la machine HA | c'est le transcodage MJPEG → H.264 de ffmpeg, inévitable pour WebRTC. Baissez `framerate` ou `jpeg_quality` sur le P4, ou regardez la caméra en mode `mjpeg`/`mse` plutôt qu'en `webrtc` |
 | Pas d'image dans la carte, mais `doorbell` visible dans go2rtc | la carte pointe sur `doorbell` alors que le P4 est en MJPEG : utilisez `doorbell_webrtc` |
 | `RTSP: unsupported transport` | un client force l'UDP ; ce serveur est en TCP interleaved uniquement |

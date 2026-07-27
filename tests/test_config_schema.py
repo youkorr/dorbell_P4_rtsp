@@ -81,13 +81,14 @@ headless = {
 }
 results.append(run("doorbell.yaml (mjpeg + raw I2S pins)", headless, True))
 
-# h264 headless must still be accepted.
-h264 = {"id": "s", "video": {"codec": "h264", "bitrate": 1500000, "gop": 15}}
-results.append(run("h264 without camera_id", h264, True))
+# H.264 is gone. 'codec: h264' must say so rather than quietly serve MJPEG:
+# a config that asked for it was relying on go2rtc not transcoding, and that
+# assumption has to break loudly.
+h264 = {"id": "s", "video": {"codec": "h264"}}
+results.append(run("codec: h264 rejected with an explanation", h264, False, "only video codec is 'mjpeg'"))
 
-# ...and h264 + camera_id must still be rejected (the check that misfired).
-h264cam = {"id": "s", "video": {"codec": "h264", "camera_id": "p4_cam"}}
-results.append(run("h264 + camera_id rejected", h264cam, False, "cannot share an"))
+# ...while an explicit 'codec: mjpeg' keeps working, so existing configs load.
+results.append(run("codec: mjpeg still accepted", {"id": "s", "video": {"codec": "mjpeg"}}, True))
 
 # Audio source mix-ups.
 mix = dict(headless); mix["audio"] = dict(headless["audio"]); mix["audio"]["microphone_id"] = "m"
@@ -118,17 +119,18 @@ results.append(run("path without leading slash rejected", badpath, False, "must 
 
 # The defaults the codegen will read must be the documented ones.
 d = rtsp.CONFIG_SCHEMA({"id": "s"})
-assert str(d["video"]["codec"]) == "mjpeg", d["video"]["codec"]
 assert d["video"]["jpeg_quality"] == 25 and d["video"]["framerate"] == 15
 assert d["port"] == 8554 and str(d["path"]) == "/doorbell"
-print("PASS   defaults: codec=mjpeg jpeg_quality=25 framerate=15 port=8554")
+# No H.264 leftovers may reach the codegen: VideoPipeline::Config no longer has
+# these members, so a stale key here would be a C++ compile error, not a warning.
+for gone in ("bitrate", "gop", "min_qp", "max_qp", "encoder_device"):
+    assert gone not in d["video"], gone
+print("PASS   defaults: jpeg_quality=25 framerate=15 port=8554, no H.264 keys left")
 
 # And the enum must still map to the right C++ symbol for codegen.
 from esphome.cpp_generator import safe_exp
-h = rtsp.CONFIG_SCHEMA({"id": "s", "video": {"codec": "h264"}})
 a = rtsp.CONFIG_SCHEMA({"id": "s", "audio": {"microphone_id": "m", "speaker_id": "s",
                                              "codec": "pcma"}})
-print("       codegen emits: video.codec  ->", safe_exp(h["video"]["codec"]))
 print("       codegen emits: audio.codec  ->", safe_exp(a["audio"]["codec"]))
 print("       codegen emits: mic.channel  ->", safe_exp(
     rtsp.CONFIG_SCHEMA({"id":"s","audio":{"microphone":{"bclk_pin":20,"lrclk_pin":21,
@@ -169,13 +171,12 @@ lv = rtsp.CONFIG_SCHEMA(lvgl)
 v = lv["video"]
 vs = _cg.StructInitializer(
     rtsp.VideoConfig,
-    ("codec", v["codec"]), ("device", v["device"]),
+    ("device", v["device"]),
     ("framerate", v["framerate"]), ("jpeg_quality", v["jpeg_quality"]),
     ("drive_camera", v["drive_camera"]),
 )
 text = str(vs)
 assert text.startswith("rtsp_server::VideoPipeline::Config{"), text
-assert ".codec = rtsp_server::VideoCodec::MJPEG," in text
 assert '.device = "/dev/video0",' in text
 assert ".drive_camera = false," in text
 print("\nGenerated C++ (VideoPipeline::Config):")

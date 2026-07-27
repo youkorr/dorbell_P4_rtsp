@@ -1,0 +1,4 @@
+# Byte-compiled Python. A stale __pycache__ of the component's __init__.py was
+# tracked here, and it changes on every schema-test run for no benefit.
+__pycache__/
+*.py[cod]

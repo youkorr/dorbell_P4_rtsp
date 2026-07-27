@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 
 #include "esp_err.h"
@@ -27,6 +28,15 @@ static const char *const TAG = "rtsp_server.audio";
 /// 500 ms of G.711 is plenty of jitter buffer on a LAN, and bounds the latency
 /// that can build up if the network delivers a burst.
 static constexpr size_t PLAYBACK_BUFFER_BYTES = G711_SAMPLE_RATE / 2;
+
+/// How long a peak is held before it is considered stale. Long enough that a
+/// sensor polling once a second still catches the peak of a spoken word, short
+/// enough that the meter falls back to silence while you watch it.
+static constexpr int64_t PEAK_HOLD_US = 1000000;
+/// The microphone is declared stopped after this long without a single sample.
+static constexpr int64_t MIC_ALIVE_US = 2000000;
+/// Reported instead of -inf dBFS, so a sensor never has to carry an infinity.
+static constexpr float SILENCE_DBFS = -100.0f;
 
 /// Saturate to the 16-bit PCM range.
 ///
@@ -158,6 +168,8 @@ size_t AudioPipeline::read_pcm_(int16_t *dst, size_t samples) {
 void AudioPipeline::write_pcm_(const int16_t *src, size_t samples) {
   if (samples == 0)
     return;
+
+  update_peak_(&this->speaker_peak_, &this->speaker_peak_us_, src, samples);
 
   if (this->external_speaker_ != nullptr) {
     this->external_speaker_->play(reinterpret_cast<const uint8_t *>(src), samples * sizeof(int16_t));
@@ -348,6 +360,120 @@ int16_t AudioPipeline::expand_(uint8_t value) const {
   return this->config_.codec == AudioCodec::PCMU ? g711::ulaw_to_linear(value) : g711::alaw_to_linear(value);
 }
 
+// ---------------------------------------------------------------------------
+// Metering
+// ---------------------------------------------------------------------------
+
+/// Deliberately lock-free. Each meter has one writer in practice, and the only
+/// consequence of a race would be a meter reading one block out of date -- not
+/// worth a mutex on the audio path.
+void AudioPipeline::update_peak_(volatile uint32_t *peak, volatile int64_t *stamp, const int16_t *pcm,
+                                 size_t samples) {
+  uint32_t block_peak = 0;
+  for (size_t i = 0; i < samples; i++) {
+    // -32768 has no positive counterpart in int16_t, so widen before negating.
+    const int32_t value = pcm[i];
+    const uint32_t magnitude = static_cast<uint32_t>(value < 0 ? -value : value);
+    if (magnitude > block_peak)
+      block_peak = magnitude;
+  }
+
+  const int64_t now = esp_timer_get_time();
+  // Hold the loudest value seen in the window, then start a fresh window. A
+  // decaying maximum is what makes the reading legible: an instantaneous peak
+  // of a 20 ms block is mostly zero even while someone is speaking.
+  if (block_peak >= *peak || (now - *stamp) > PEAK_HOLD_US) {
+    *peak = block_peak;
+    *stamp = now;
+  }
+}
+
+float AudioPipeline::read_peak_(volatile uint32_t peak, volatile int64_t stamp) {
+  if (stamp == 0 || (esp_timer_get_time() - stamp) > PEAK_HOLD_US)
+    return 0.0f;
+  return static_cast<float>(peak) / 32768.0f;
+}
+
+void AudioPipeline::render_bar_(char *dst, float level) {
+  // Logarithmic, because a linear meter spends nine tenths of its travel on the
+  // top 20 dB and shows nothing at all for ordinary speech.
+  const float db = level <= 0.0f ? SILENCE_DBFS : 20.0f * std::log10(level);
+  int filled = static_cast<int>((db + 60.0f) / 6.0f);  // -60 dBFS .. 0 dBFS
+  if (filled < 0)
+    filled = 0;
+  if (filled > 10)
+    filled = 10;
+
+  dst[0] = '[';
+  for (int i = 0; i < 10; i++)
+    dst[1 + i] = i < filled ? '#' : '-';
+  dst[11] = ']';
+  dst[12] = '\0';
+}
+
+float AudioPipeline::mic_level() const { return read_peak_(this->mic_peak_, this->mic_peak_us_); }
+
+float AudioPipeline::speaker_level() const { return read_peak_(this->speaker_peak_, this->speaker_peak_us_); }
+
+float AudioPipeline::mic_level_db() const {
+  const float level = this->mic_level();
+  return level <= 0.0f ? SILENCE_DBFS : 20.0f * std::log10(level);
+}
+
+float AudioPipeline::speaker_level_db() const {
+  const float level = this->speaker_level();
+  return level <= 0.0f ? SILENCE_DBFS : 20.0f * std::log10(level);
+}
+
+const char *AudioPipeline::mic_level_bar() const {
+  render_bar_(this->mic_bar_, this->mic_level());
+  return this->mic_bar_;
+}
+
+const char *AudioPipeline::speaker_level_bar() const {
+  render_bar_(this->speaker_bar_, this->speaker_level());
+  return this->speaker_bar_;
+}
+
+bool AudioPipeline::mic_alive() const {
+  if (!this->running_ || this->mic_last_sample_us_ == 0)
+    return false;
+  return (esp_timer_get_time() - this->mic_last_sample_us_) < MIC_ALIVE_US;
+}
+
+void AudioPipeline::play_test_tone(uint32_t frequency, uint32_t duration_ms) {
+  if (!this->has_speaker())
+    return;
+  this->tone_frequency_ = frequency == 0 ? 1000 : frequency;
+  this->tone_phase_ = 0;
+  // Written last: the playback task reads this to decide whether to synthesise,
+  // so the frequency must already be in place when it becomes non-zero.
+  this->tone_remaining_ = (this->config_.sample_rate * duration_ms) / 1000;
+}
+
+size_t AudioPipeline::take_test_tone_(int16_t *dst, size_t samples) {
+  const uint32_t remaining = this->tone_remaining_;
+  if (remaining == 0)
+    return 0;
+
+  const size_t count = remaining < samples ? remaining : samples;
+  const uint32_t rate = this->config_.sample_rate;
+  for (size_t i = 0; i < count; i++) {
+    const float phase = 2.0f * 3.14159265f * static_cast<float>(this->tone_phase_) *
+                        static_cast<float>(this->tone_frequency_) / static_cast<float>(rate);
+    // Half scale: loud enough to hear across a room, quiet enough not to clip
+    // an amplifier that is already turned up.
+    dst[i] = static_cast<int16_t>(std::sin(phase) * 16000.0f);
+    // Wrapping at one second keeps the sample index small, so the float never
+    // loses precision on a long beep. The frequency is a whole number of hertz,
+    // so a full second is a whole number of cycles and the wrap is seamless.
+    if (++this->tone_phase_ >= rate)
+      this->tone_phase_ = 0;
+  }
+  this->tone_remaining_ = remaining - static_cast<uint32_t>(count);
+  return count;
+}
+
 bool AudioPipeline::is_talking() const {
   if (this->last_playback_us_ == 0)
     return false;
@@ -382,11 +508,17 @@ void AudioPipeline::capture_run_() {
 
   std::vector<int16_t> pcm(pcm_samples);
   std::vector<uint8_t> encoded(G711_SAMPLES_PER_PACKET);
+  // The 8 kHz signal, kept so it can be metered and looped back after the gain
+  // stage -- that is, exactly what the far end will hear.
+  std::vector<int16_t> narrowband(G711_SAMPLES_PER_PACKET);
 
   while (!this->should_stop_) {
     const size_t got = this->read_pcm_(pcm.data(), pcm_samples);
     if (got == 0)
       continue;
+
+    this->mic_samples_ += static_cast<uint32_t>(got);
+    this->mic_last_sample_us_ = esp_timer_get_time();
 
     const bool muted = this->config_.half_duplex && this->is_talking();
 
@@ -399,13 +531,34 @@ void AudioPipeline::capture_run_() {
       // 16 kHz content from aliasing into the 8 kHz G.711 band.
       acc /= static_cast<int32_t>(decimation);
 
-      const int16_t sample = muted ? 0 : clamp_pcm16(static_cast<int32_t>(acc * this->config_.mic_gain));
-      encoded[out_count++] = this->compand_(sample);
+      narrowband[out_count] = clamp_pcm16(static_cast<int32_t>(acc * this->config_.mic_gain));
+      encoded[out_count] = this->compand_(muted ? 0 : narrowband[out_count]);
+      out_count++;
       if (out_count == G711_SAMPLES_PER_PACKET)
         break;
     }
 
-    if (out_count > 0 && this->callback_) {
+    if (out_count == 0)
+      continue;
+
+    // Metered before the half-duplex mute, on purpose: the meter answers "does
+    // the microphone hear anything", and that question stays valid -- and worth
+    // asking -- while the far end is talking and the mic is being held silent.
+    update_peak_(&this->mic_peak_, &this->mic_peak_us_, narrowband.data(), out_count);
+
+    if (this->loopback_) {
+      // Back up to the sink's rate before writing, or the monitor plays an
+      // octave low and twice as slow. Sample-and-hold is enough here: the
+      // signal really is band-limited to 4 kHz at this point, and holding each
+      // sample reproduces what the far end hears rather than flattering it.
+      size_t n = 0;
+      for (size_t i = 0; i < out_count; i++)
+        for (uint32_t d = 0; d < decimation; d++)
+          pcm[n++] = narrowband[i];
+      this->write_pcm_(pcm.data(), n);
+    }
+
+    if (this->callback_) {
       this->callback_(encoded.data(), out_count, this->rtp_timestamp_);
       this->rtp_timestamp_ += static_cast<uint32_t>(out_count);
       this->packets_sent_++;
@@ -425,17 +578,40 @@ void AudioPipeline::playback_run_() {
   int16_t previous = 0;
 
   while (!this->should_stop_) {
+    // The test beep owns the sink while it lasts: it is a deliberate bench
+    // action, and mixing it with whatever else is playing would only make the
+    // result harder to read.
+    if (this->tone_remaining_ > 0) {
+      const size_t count = this->take_test_tone_(pcm.data(), pcm.size());
+      if (count > 0) {
+        this->write_pcm_(pcm.data(), count);
+        // Synthesis is far faster than playback, so pace it. Without this the
+        // loop hands the sink a second of tone in a few milliseconds and an
+        // ESPHome speaker, which drops rather than blocks, plays a click.
+        vTaskDelay(pdMS_TO_TICKS((count * 1000) / this->config_.sample_rate));
+        continue;
+      }
+    }
+
     const size_t got = xStreamBufferReceive(this->playback_buffer_, encoded.data(), encoded.size(),
                                             pdMS_TO_TICKS(20));
     if (got == 0) {
       // Nothing queued mid-sentence: keep the sink fed with silence so the DMA
       // never underruns and the amplifier does not click.
-      if (this->is_talking()) {
+      if (this->is_talking() && !this->loopback_) {
         std::fill(pcm.begin(), pcm.end(), static_cast<int16_t>(0));
         this->write_pcm_(pcm.data(), pcm.size());
       } else {
         previous = 0;
       }
+      continue;
+    }
+
+    // While the loopback monitor is on, the capture task owns the speaker.
+    // Two tasks pushing into one sink interleave into noise, and the backchannel
+    // is not what is being tested at that moment anyway.
+    if (this->loopback_) {
+      previous = 0;
       continue;
     }
 

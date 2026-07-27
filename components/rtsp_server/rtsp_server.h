@@ -66,6 +66,11 @@ class RTSPServer : public Component, public RtpSender {
     this->audio_enabled_ = true;
   }
   void set_camera(esp_cam_sensor::MipiDSICamComponent *camera) { this->video_.set_camera(camera); }
+  /// Take over (or hand back) the V4L2 dequeue at runtime -- call this from
+  /// whatever turns the LVGL preview on and off, so the camera always has
+  /// exactly one consumer driving it. See VideoPipeline::set_drive_camera.
+  void set_drive_camera(bool drive) { this->video_.set_drive_camera(drive); }
+  bool drive_camera() const { return this->video_.drive_camera(); }
   void set_microphone(microphone::Microphone *microphone) { this->audio_.set_microphone(microphone); }
   void set_speaker(speaker::Speaker *speaker) { this->audio_.set_speaker(speaker); }
 
@@ -85,6 +90,42 @@ class RTSPServer : public Component, public RtpSender {
   uint8_t client_count() const { return this->client_count_; }
   bool is_streaming() const { return this->active_streams_ > 0; }
   bool is_talking() const { return this->audio_.is_talking(); }
+
+  // ---- audio diagnostics, usable from lambdas ------------------------------
+  // These exist so "is the microphone working?" can be answered from Home
+  // Assistant or from the screen, without a scope and without go2rtc. They
+  // read live counters and levels, so they are cheap enough to poll every
+  // second from a template sensor.
+
+  /// True once the capture/playback tasks are up.
+  bool audio_running() const { return this->audio_.is_running(); }
+  /// True when a speaker is wired, i.e. when the backchannel can be announced.
+  bool has_speaker() const { return this->audio_.has_speaker(); }
+  /// Peak level of the microphone over the last window, 0.0 – 1.0, gain applied.
+  float mic_level() const { return this->audio_.mic_level(); }
+  /// Same reading in dBFS: -100.0 for digital silence, 0.0 for full scale.
+  float mic_level_db() const { return this->audio_.mic_level_db(); }
+  /// Peak level of what is being pushed to the speaker, 0.0 – 1.0.
+  float speaker_level() const { return this->audio_.speaker_level(); }
+  float speaker_level_db() const { return this->audio_.speaker_level_db(); }
+  /// PCM samples read from the microphone since boot. Frozen at 0 means the
+  /// source delivers nothing at all -- a different fault from "delivers silence".
+  uint32_t mic_samples() const { return this->audio_.mic_samples(); }
+  /// True while the microphone source keeps delivering samples.
+  bool mic_alive() const { return this->audio_.mic_alive(); }
+  uint32_t audio_packets_sent() const { return this->audio_.packets_sent(); }
+  uint32_t audio_packets_received() const { return this->audio_.packets_received(); }
+  uint32_t audio_packets_dropped() const { return this->audio_.packets_dropped(); }
+
+  /// Route the microphone straight to the speaker, locally. Speak and you hear
+  /// yourself: one press proves capture, companding and playback at once, with
+  /// no network, no go2rtc and no browser in the way.
+  void set_audio_loopback(bool enabled) { this->audio_.set_loopback(enabled); }
+  bool audio_loopback() const { return this->audio_.loopback(); }
+  /// Play a beep on the speaker. Proves the output path on its own.
+  void play_test_tone(uint32_t frequency, uint32_t duration_ms) {
+    this->audio_.play_test_tone(frequency, duration_ms);
+  }
 
   // ---- RtpSender ----------------------------------------------------------
   void send_rtp(StreamKind kind, uint8_t *buf, size_t rtp_len) override;
@@ -111,9 +152,8 @@ class RTSPServer : public Component, public RtpSender {
   std::string build_sdp_(const std::string &local_ip, bool with_backchannel);
   std::string local_ip_of_(int fd) const;
 
-  void on_video_frame_(const uint8_t *au, size_t len, uint32_t timestamp);
+  void on_video_frame_(const uint8_t *jpeg, size_t len, uint32_t timestamp);
   void on_audio_frame_(const uint8_t *g711, size_t count, uint32_t timestamp);
-  void cache_parameter_sets_(const uint8_t *au, size_t len);
 
   // ---- configuration ------------------------------------------------------
   uint16_t port_{8554};
@@ -131,7 +171,6 @@ class RTSPServer : public Component, public RtpSender {
   VideoPipeline video_;
   AudioPipeline audio_;
 
-  std::unique_ptr<H264Packetizer> h264_packetizer_;
   std::unique_ptr<MjpegPacketizer> mjpeg_packetizer_;
   std::unique_ptr<G711Packetizer> audio_packetizer_;
 
@@ -139,10 +178,6 @@ class RTSPServer : public Component, public RtpSender {
   std::vector<std::unique_ptr<RtspSession>> sessions_;
   TaskHandle_t network_task_{nullptr};
   RingbufHandle_t tx_ring_{nullptr};
-
-  Mutex parameter_sets_lock_;
-  std::vector<uint8_t> sps_;
-  std::vector<uint8_t> pps_;
 
   bool pipelines_started_{false};
   uint32_t session_counter_{0};

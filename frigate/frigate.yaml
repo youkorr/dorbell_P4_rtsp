@@ -1,4 +1,6 @@
------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Configuration Frigate de reference pour la sonnette ESP32-P4.
+# ---------------------------------------------------------------------
 
 version: 0.17-0
 
@@ -48,8 +50,9 @@ go2rtc:
     # La seconde ligne apporte directement le micro ET le backchannel, en G.711
     # intact : aucun aller-retour de codec sur la voix.
     #
-    # Si vous passez le P4 en `codec: h264`, supprimez `doorbell_webrtc`, retirez
-    # le '#backchannel=0' de `doorbell` et pointez la caméra sur `doorbell`.
+    # Le transcodage ci-dessous n'est pas évitable : le P4 n'émet que du MJPEG,
+    # que WebRTC ne sait pas transporter. (Le H.264 a été retiré du composant —
+    # le P4 ne sait pas le décoder pour son propre aperçu LVGL ; voir le README.)
     doorbell_webrtc:
       #- ffmpeg:doorbell#video=h264
       #- ffmpeg:doorbell#video=h264#audio=copy#raw=-r 15 -g 15 
