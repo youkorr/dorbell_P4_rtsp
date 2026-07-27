@@ -6,7 +6,8 @@ Three harnesses, all runnable on a plain Linux host without ESP-IDF.
 |---|---|
 | `lint_cpp.sh` | the C++ is internally consistent and compiles |
 | `test_config_schema.py` | the ESPHome schema and codegen behave |
-| `test_rtp.cpp` | the RTP packetizers produce correct bytes |
+| `test_rtp.cpp` | H.264 / G.711 packetizers and G.711 companding |
+| `test_mjpeg.cpp` | RFC 2435 against real JPEGs, reassembled byte-exact |
 
 ```bash
 ./tests/lint_cpp.sh
@@ -16,6 +17,11 @@ python3 tests/test_config_schema.py
 
 g++ -std=gnu++17 -fsanitize=address,undefined -I components/rtsp_server \
     -o /tmp/test_rtp tests/test_rtp.cpp components/rtsp_server/rtp.cpp && /tmp/test_rtp
+
+pip install Pillow
+python3 tests/make_jpeg_fixtures.py /tmp/fx
+g++ -std=gnu++17 -fsanitize=address,undefined -I components/rtsp_server \
+    -o /tmp/test_mjpeg tests/test_mjpeg.cpp components/rtsp_server/rtp.cpp && /tmp/test_mjpeg /tmp/fx
 ```
 
 ## What none of them prove
