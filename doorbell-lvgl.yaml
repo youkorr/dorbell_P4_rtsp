@@ -409,6 +409,19 @@ touchscreen:
     update_interval: 8ms
     on_touch:
       - light.turn_on: backlight
+      # Diagnostic d'orientation. `rotation: 180` côté LVGL et
+      # `mirror_x`/`mirror_y` ci-dessous appliquent CHACUN une rotation de 180° :
+      # s'ils se composent au lieu de se compenser, l'appui atterrit au point
+      # symétrique et les boutons paraissent morts.
+      #
+      # Appuyez sur « Sonner » (x 836..1012, y 320..380) et lisez les
+      # coordonnées. Si elles sortent vers x~12 y~144, la double rotation est
+      # confirmée : retirez `mirror_x`/`mirror_y` OU `rotation: 180`, pas les
+      # deux. Retirez ce bloc `logger.log` une fois l'écran calibré.
+      - logger.log:
+          format: "touch: x=%d y=%d"
+          args: [touch.x, touch.y]
+          level: INFO
     transform:
       swap_xy: false
       mirror_x: true

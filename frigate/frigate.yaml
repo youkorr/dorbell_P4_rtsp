@@ -87,8 +87,19 @@ go2rtc:
     #
     # Si vous passez le P4 en `codec: h264`, supprimez `doorbell_webrtc`, retirez
     # le '#backchannel=0' de `doorbell` et pointez la caméra sur `doorbell`.
+    # `#raw=` ajoute des arguments ffmpeg bruts, et les deux comptent pour WebRTC :
+    #
+    #   -r 15   force une cadence CONSTANTE. Les horodatages RTP du P4 viennent
+    #           d'un timer logiciel et sont legerement irreguliers ; transcodes
+    #           tels quels ils donnent des PTS irreguliers, que WebRTC rend en
+    #           saccades. MSE, plus tolerant, ne le montre pas -- d'ou une
+    #           interface Frigate fluide et une carte hachee sur le meme flux.
+    #
+    #   -g 15   une image cle par seconde. Le defaut de go2rtc est -g 50, soit
+    #           une cle toutes les 3,3 s a 15 fps : apres la moindre perte,
+    #           WebRTC fige jusqu'a la suivante.
     doorbell_webrtc:
-      - ffmpeg:doorbell#video=h264
+      - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
       - rtsp://1169:{FRIGATE_DOORBELL_PASSWORD}@192.168.1.9:8554/doorbell#backchannel=1
 
   webrtc:
