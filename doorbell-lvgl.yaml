@@ -162,10 +162,26 @@ fdaudio:
   output_codec: es8311
   output_address: 0x18
   mic_address: 0x40
-  mic_gain_db: 24
+  mic_gain_db: 24 # gain analogique de l'ES7210
   output_volume: 60
   sample_rate: 16000
-  enable_aec: false
+  # Les réglages qui suivent sont DÉSACTIVÉS par défaut dans fdaudio, et c'est
+  # la cause habituelle du « on m'entend trop faible ». Ils agissent en amont du
+  # serveur RTSP, sur le chemin micro du codec.
+  #
+  # AGC : remonte automatiquement un micro faible jusqu'à ce niveau de crête.
+  # C'est le bon levier ici — préférez-le à un gain fixe, qui sature dès qu'on
+  # parle près de la sonnette. 0 = désactivé.
+  mic_agc: 10000
+  # Atténuation du micro pendant que le haut-parleur joue le correspondant
+  # (en %). 80-90 supprime l'écho de conversation. 0 = désactivé.
+  echo_suppression: 85
+  # Annulation d'écho logicielle. Le défaut de fdaudio est `true` ; ce fichier
+  # la forçait à false, ce qui laissait le correspondant s'entendre lui-même.
+  enable_aec: true
+  # Porte de bruit, en amplitude 0..32767. À n'activer que si le souffle ambiant
+  # gêne : elle peut manger le début des phrases. 0 = désactivée.
+  noise_gate: 0
 
 microphone:
   - platform: fdaudio
@@ -244,10 +260,12 @@ rtsp_server:
     # piloter des broches I2S : le codec reste partagé avec les autres usages.
     microphone_id: board_microphone
     speaker_id: board_speaker
-    # Niveaux appliqués par le pipeline RTSP, en plus de ceux du codec
-    # (`mic_gain_db` / `output_volume` du bloc fdaudio). Montez `gain` si le
-    # micro arrive trop faible chez le correspondant ; 1.0 = aucun changement.
-    gain: 4.0
+    # Niveaux appliqués par le pipeline RTSP, APRÈS ceux du codec. On les laisse
+    # neutres ici : fdaudio fait déjà l'AGC (`mic_agc` ci-dessus), et empiler un
+    # gain fixe par-dessus une AGC ne rend pas plus fort, ça écrête. Réglez le
+    # niveau en amont, dans le bloc `fdaudio:`.
+    # Ces deux options servent surtout au chemin I2S direct, sans codec.
+    gain: 1.0
     volume: 0.8
     half_duplex: true
     talk_timeout: 300ms
