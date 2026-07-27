@@ -289,26 +289,36 @@ binary_sensor:
       - delayed_on: 30ms
       - delayed_off: 100ms
     on_press:
-      - switch.turn_on: chime_relay
+      - script.execute: ring
+
+# Le carillon et l'appui sur le bouton partagent la même séquence, qu'elle
+# vienne du bouton physique ou du bouton tactile de l'écran.
+script:
+  - id: ring
+    mode: restart
+    then:
       - lvgl.label.update:
           id: stream_status
           text: "● Sonnerie !"
           text_color: ${col_amber}
       - light.turn_on: backlight
-      - delay: 1s
-      - switch.turn_off: chime_relay
+      - delay: 3s
+      - lvgl.label.update:
+          id: stream_status
+          text: "● En attente"
+          text_color: ${col_text2}
 
 switch:
+  # NOTE : cette carte n'a PAS de relais de carillon sur GPIO — GPIO33 porte le
+  # `reset_pin` de l'écran MIPI-DSI (voir le bloc `display:`). Le carillon est
+  # donc un bouton tactile LVGL, et la notification part par l'API Home
+  # Assistant. Si votre carte a bien un relais libre, redéclarez-le ici sur une
+  # broche qui n'est utilisée nulle part ailleurs dans ce fichier.
   - platform: gpio
     pin: GPIO53
     name: "Amplificateur audio"
     id: audio_amplifier
     restore_mode: ALWAYS_ON
-  - platform: gpio
-    id: chime_relay
-    name: "Carillon"
-    pin: GPIO33
-    restore_mode: ALWAYS_OFF
 
 output:
   - platform: ledc
@@ -474,6 +484,56 @@ lvgl:
             text: "0 client"
             text_color: ${col_text2}
             text_font: f_18
+
+        # ---------- Carillon ----------
+        # Remplace le relais GPIO : sur cette carte GPIO33 est déjà le
+        # `reset_pin` de l'écran, il n'y a donc pas de broche libre pour lui.
+        - button:
+            id: btn_ring
+            x: 836
+            y: 320
+            width: 176
+            height: 60
+            bg_color: ${col_panel}
+            bg_opa: COVER
+            border_width: 1
+            border_color: ${col_amber}
+            radius: 8
+            widgets:
+              - label:
+                  align: CENTER
+                  text: "Sonner"
+                  text_color: ${col_amber}
+                  text_font: f_24
+            on_click:
+              - script.execute: ring
+
+        # ---------- Ampli ----------
+        # Le couper supprime le souffle au repos et, si le codec de la carte
+        # renvoie le micro dans le haut-parleur, l'effet Larsen avec lui.
+        - button:
+            id: btn_amp
+            x: 836
+            y: 396
+            width: 176
+            height: 60
+            bg_color: ${col_panel}
+            bg_opa: COVER
+            border_width: 1
+            border_color: ${col_text2}
+            radius: 8
+            widgets:
+              - label:
+                  id: amp_label
+                  align: CENTER
+                  text: "Ampli ON"
+                  text_color: ${col_text}
+                  text_font: f_18
+            on_click:
+              - switch.toggle: audio_amplifier
+              - lvgl.label.update:
+                  id: amp_label
+                  text: !lambda 'return id(audio_amplifier).state ? "Ampli ON" : "Ampli OFF";'
 
 interval:
   - interval: 5s

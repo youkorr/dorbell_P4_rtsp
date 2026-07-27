@@ -52,6 +52,34 @@ else
 fi
 
 echo
+echo "== YAML pins =="
+# A GPIO claimed twice in one config is accepted by every check above and only
+# shows up as unexplained hardware misbehaviour on the bench: the chime relay
+# and the display reset once shared GPIO33 in doorbell-lvgl.yaml.
+if python3 - <<'PY'
+import collections, glob, re, sys
+
+bad = False
+for path in sorted(glob.glob("*.yaml")):
+    use = collections.defaultdict(list)
+    for n, line in enumerate(open(path), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in re.finditer(r"(\w*_pin|pin|number)\s*:\s*(?:GPIO)?(\d+)\b", line):
+            use[int(m.group(2))].append((n, line.strip()))
+    for pin, sites in sorted(use.items()):
+        if len(sites) > 1:
+            bad = True
+            print(f"  FAILED: {path} uses GPIO{pin} {len(sites)} times")
+            for n, text in sites:
+                print(f"            L{n}: {text}")
+    if not bad:
+        print(f"  OK   {path}: no GPIO claimed twice")
+sys.exit(1 if bad else 0)
+PY
+then :; else fail=1; fi
+
+echo
 echo "== compile =="
 for f in "$SRC"/*.cpp; do
   name=$(basename "$f")
