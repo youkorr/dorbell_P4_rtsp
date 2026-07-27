@@ -344,11 +344,15 @@ script:
           text: "● Sonnerie !"
           text_color: ${col_amber}
       - light.turn_on: backlight
-      - delay: 1s
+      # 5 s, pas une impulsion breve. Un appui d'une seconde declenche bien les
+      # automatisations, mais il est INVISIBLE dans Outils de developpement ->
+      # Etats : le temps de quitter la sonnette et de revenir a l'ecran, le
+      # capteur est deja retombe a 'off', et tout parait casse alors que rien ne
+      # l'est. Cinq secondes se voient a l'oeil et couvrent « quelqu'un sonne ».
+      - delay: 5s
       - binary_sensor.template.publish:
           id: doorbell_button
           state: false
-      - delay: 2s
       - lvgl.label.update:
           id: stream_status
           text: "● En attente"
