@@ -244,6 +244,11 @@ rtsp_server:
     # piloter des broches I2S : le codec reste partagé avec les autres usages.
     microphone_id: board_microphone
     speaker_id: board_speaker
+    # Niveaux appliqués par le pipeline RTSP, en plus de ceux du codec
+    # (`mic_gain_db` / `output_volume` du bloc fdaudio). Montez `gain` si le
+    # micro arrive trop faible chez le correspondant ; 1.0 = aucun changement.
+    gain: 4.0
+    volume: 0.8
     half_duplex: true
     talk_timeout: 300ms
 

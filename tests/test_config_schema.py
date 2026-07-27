@@ -135,6 +135,34 @@ print("       codegen emits: mic.channel  ->", safe_exp(
     "din_pin":22,"channel":"right"}}})["audio"]["microphone"]["channel"]))
 
 
+# 'gain'/'volume' must be reachable on BOTH audio sources. With 'microphone_id'
+# there is no nested I2S block to carry them, and they used to be pinned to 1.0
+# with no way out -- a microphone that arrived too quiet stayed too quiet.
+comp = rtsp.CONFIG_SCHEMA({"id": "s", "audio": {"microphone_id": "m", "speaker_id": "sp",
+                                                "gain": 8.0, "volume": 0.5}})["audio"]
+assert rtsp._level(comp, rtsp.CONF_GAIN, None, 1.0) == 8.0
+assert rtsp._level(comp, rtsp.CONF_VOLUME, None, 1.0) == 0.5
+
+# Omitted on the component path -> the neutral 1.0, never a silent boost.
+bare = rtsp.CONFIG_SCHEMA({"id": "s", "audio": {"microphone_id": "m"}})["audio"]
+assert rtsp._level(bare, rtsp.CONF_GAIN, None, 1.0) == 1.0
+
+# On the I2S path the nested block still applies when nothing is set above it.
+pins_only = rtsp.CONFIG_SCHEMA(headless)["audio"]
+assert rtsp._level(pins_only, rtsp.CONF_GAIN, pins_only["microphone"], 1.0) == 6.0
+assert rtsp._level(pins_only, rtsp.CONF_VOLUME, pins_only["speaker"], 1.0) == 0.8
+
+# ...and the audio-level value overrides it, so a block can be tuned in place.
+over = dict(headless); over["audio"] = dict(headless["audio"], gain=2.5, volume=0.1)
+oc = rtsp.CONFIG_SCHEMA(over)["audio"]
+assert rtsp._level(oc, rtsp.CONF_GAIN, oc["microphone"], 1.0) == 2.5
+assert rtsp._level(oc, rtsp.CONF_VOLUME, oc["speaker"], 1.0) == 0.1
+
+results.append(run("gain out of range rejected", {"id": "s", "audio": {"microphone_id": "m", "gain": 99.0}},
+                   False, "value must be at most 64"))
+print("PASS   gain/volume reachable on the component path, overriding the I2S blocks")
+
+
 # The struct initializers must be valid C++ designated initializers.
 import esphome.codegen as _cg
 lv = rtsp.CONFIG_SCHEMA(lvgl)

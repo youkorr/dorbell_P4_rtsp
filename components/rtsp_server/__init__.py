@@ -122,6 +122,22 @@ def _selected(value):
     return str(value)
 
 
+def _level(audio, key, block, fallback):
+    """Resolve 'gain'/'volume', which may sit at the audio level or in an I2S block.
+
+    The audio-level value is the general one: it is the only one reachable when
+    the audio comes from an ESPHome component ('microphone_id'/'speaker_id'),
+    where there is no nested pin block to carry it. When both are present the
+    audio-level value wins, so a config can override a block without rewriting
+    it.
+    """
+    if key in audio:
+        return audio[key]
+    if block is not None:
+        return block[key]
+    return fallback
+
+
 def _validate_path(value):
     value = cv.string(value)
     if not value.startswith("/"):
@@ -254,6 +270,13 @@ AUDIO_SCHEMA = cv.All(
             # Source B: raw I2S pins, for a minimal headless doorbell.
             cv.Optional(CONF_MICROPHONE): MICROPHONE_SCHEMA,
             cv.Optional(CONF_SPEAKER): SPEAKER_SCHEMA,
+            # Level controls that work with BOTH sources. The nested I2S blocks
+            # have their own 'gain'/'volume', but those are unreachable when the
+            # audio comes from a component ('microphone_id'), which used to leave
+            # no way at all to fix a microphone that arrives too quiet. Set here,
+            # these win over the nested values.
+            cv.Optional(CONF_GAIN): cv.float_range(min=0.1, max=64.0),
+            cv.Optional(CONF_VOLUME): cv.float_range(min=0.0, max=1.0),
             cv.Optional(CONF_HALF_DUPLEX, default=True): cv.boolean,
             cv.Optional(CONF_TALK_TIMEOUT, default="300ms"): cv.positive_time_period_milliseconds,
         }
@@ -373,7 +396,7 @@ async def to_code(config):
                     ("mic_din", mic[CONF_DIN_PIN] if mic else -1),
                     ("mic_bits", mic[CONF_BITS_PER_SAMPLE] if mic else 16),
                     ("mic_right_slot", mic[CONF_CHANNEL] if mic else False),
-                    ("mic_gain", mic[CONF_GAIN] if mic else 1.0),
+                    ("mic_gain", _level(audio, CONF_GAIN, mic, 1.0)),
                     # With ESPHome audio components the speaker is enabled by
                     # 'speaker_id'; with raw I2S it is the 'speaker' pin block.
                     (
@@ -386,7 +409,7 @@ async def to_code(config):
                     ("speaker_dout", spk[CONF_DOUT_PIN] if spk else -1),
                     ("speaker_bits", spk[CONF_BITS_PER_SAMPLE] if spk else 16),
                     ("speaker_right_slot", spk[CONF_CHANNEL] if spk else False),
-                    ("speaker_volume", spk[CONF_VOLUME] if spk else 1.0),
+                    ("speaker_volume", _level(audio, CONF_VOLUME, spk, 1.0)),
                     ("half_duplex", audio[CONF_HALF_DUPLEX]),
                     ("talk_timeout_ms", audio[CONF_TALK_TIMEOUT].total_milliseconds),
                 )
