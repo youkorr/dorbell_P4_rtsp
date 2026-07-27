@@ -54,6 +54,86 @@ Les `user:pass` de l'URL sont les `username:` / `password:` du bloc
 `rtsp_server:`. S'ils sont absents de votre configuration, le flux est ouvert et
 l'URL se réduit à `rtsp://192.168.1.50:8554/doorbell`.
 
+## 0 bis. Quelle instance de go2rtc ? (à trancher en premier)
+
+Il peut y en avoir **trois** sur une même machine, toutes sur le port 1984, et
+c'est la source de confusion n°1 :
+
+| Instance | Sa configuration | Éditable à la main ? |
+|---|---|---|
+| Add-on go2rtc | le fichier indiqué par ses logs | oui |
+| go2rtc intégré à Home Assistant (≥ 2024.11) | générée automatiquement | **non**, réécrite à chaque démarrage |
+| go2rtc intégré à Frigate | la section `go2rtc:` de `frigate.yaml` | oui |
+
+**N'en gardez qu'une.** Si deux tournent, celle que vous voyez sur `:1984`
+n'est pas forcément celle dont vous éditez le fichier : vos modifications
+semblent alors « disparaître » alors qu'elles n'ont jamais été lues.
+
+La seule source fiable est la première ligne des logs de go2rtc :
+
+```
+info  config path=/config/go2rtc_homekit.yml
+```
+
+C'est ce fichier-là qu'il faut éditer, quel que soit le nom attendu.
+
+## 0 ter. Passer par Frigate (recommandé si vous l'avez déjà)
+
+Frigate embarque go2rtc et lit sa configuration depuis `frigate.yaml`, qui n'est
+jamais réécrit. C'est aussi la seule voie où **l'audio bidirectionnel de
+l'Advanced Camera Card est officiellement supporté** : la carte réserve cette
+fonction aux caméras de type Frigate.
+
+Désactivez d'abord le démarrage automatique de l'add-on go2rtc, sinon les deux
+se disputent les ports.
+
+```yaml
+# frigate.yaml
+go2rtc:
+  streams:
+    doorbell:
+      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=0
+    doorbell_webrtc:
+      - ffmpeg:doorbell#video=h264
+      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=1
+
+cameras:
+  doorbell:
+    ffmpeg:
+      inputs:
+        # On consomme le restream de go2rtc, pas le P4 directement : le P4 n'a
+        # ainsi qu'un seul client à servir, quel que soit le nombre de vues.
+        - path: rtsp://127.0.0.1:8554/doorbell_webrtc
+          input_args: preset-rtsp-restream
+          roles: [detect, record]
+    detect:
+      width: 800
+      height: 640
+      fps: 5
+    live:
+      # Frigate 0.14. En 0.15+ c'est un dictionnaire :
+      #   streams: {Sonnette: doorbell_webrtc}
+      stream_name: doorbell_webrtc
+```
+
+La carte pointe alors sur la caméra Frigate, sans bloc `go2rtc:` :
+
+```yaml
+type: custom:frigate-card
+cameras:
+  - camera_entity: camera.doorbell
+    live_provider: go2rtc
+menu:
+  buttons:
+    microphone:
+      enabled: true
+      type: momentary
+```
+
+Les règles de la section 1 restent valables : le transcodage H.264 est
+nécessaire tant que le P4 est en `codec: mjpeg`, et la ligne `#backchannel=1`
+séparée reste ce qui porte le push-to-talk.
+
 ## 1. MJPEG : quel flux go2rtc utiliser ?
 
 Le composant sort du **MJPEG** par défaut. WebRTC ne sait pas transporter du
