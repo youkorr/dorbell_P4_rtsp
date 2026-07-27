@@ -162,6 +162,8 @@ class RTSPServer : public Component, public RtpSender {
 
   /// Periodic one-block summary of the whole chain, for diagnosis.
   void log_status_();
+  /// Recompute `negotiated_mask_` across all playing sessions. Network task only.
+  void refresh_negotiated_mask_();
   /// Set when a video frame could not be queued whole: the rest of that frame
   /// is discarded so the receiver never sees a fragment with a hole in it.
   bool tx_dropping_frame_{false};

@@ -255,6 +255,76 @@ ui: true
 `microphone` dans `media` est ce qui fait apparaître le bouton micro et
 déclenche la négociation du backchannel. Sans lui, le flux reste descendant.
 
+## 4 ter. Pourquoi MJPEG et push-to-talk sont incompatibles en pratique
+
+C'est le point le plus important de cette page, et il n'apparaît dans aucune
+documentation : **la carte n'affiche le bouton micro que s'il y a UN SEUL
+consommateur sur le flux** ([advanced-camera-card
+#1888](https://github.com/dermotduffy/advanced-camera-card/issues/1888)).
+
+Or la chaîne MJPEG en impose deux, par construction :
+
+```
+doorbell_webrtc:
+  - ffmpeg:doorbell#video=h264   <- transcode la vidéo, ne remonte PAS le backchannel
+  - rtsp://...#backchannel=1     <- source dédiée pour la voix montante
+```
+
+ffmpeg ne tire que dans un sens : il ne peut pas porter le backchannel. Il faut
+donc une seconde source, et ces deux sources font deux consommateurs. Le bouton
+micro ne s'affiche pas. Ce n'est pas un réglage à trouver, c'est une impasse.
+
+Le bloc d'état du P4 la rend visible d'un coup d'œil :
+
+```
+clients=2 playing=2 | negotiated: video=NO audio=yes backchannel=NO
+```
+
+### La sortie : H.264 sur le P4
+
+En `codec: h264`, la vidéo est déjà dans le format que WebRTC attend. Plus de
+transcodage, donc plus de seconde source :
+
+```yaml
+go2rtc:
+  streams:
+    doorbell:
+      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell
+```
+
+Une source, un consommateur, le backchannel porté par la même connexion. Le
+bouton micro apparaît. Et les saccades disparaissent avec le transcodage, qui
+en était la cause.
+
+Côté ESPHome :
+
+```yaml
+esp_video:
+  enable_h264: true
+
+rtsp_server:
+  video:
+    codec: h264
+    bitrate: 1500000
+    gop: 15
+```
+
+**Ce que cela coûte** : `codec: h264` lit du YUV420 directement sur le
+périphérique V4L2 et ne peut donc pas partager la caméra avec `lvgl_camera_display`,
+qui a besoin de RGB565. **Vous perdez l'aperçu local sur l'écran.** Le composant
+refuse d'ailleurs la combinaison à la validation.
+
+La résolution doit aussi être un multiple de 16 sur les deux axes — 800x640
+convient, 800x600 non.
+
+| | MJPEG + aperçu LVGL | H.264 sans aperçu |
+|---|---|---|
+| Image dans la carte | fluide en mode `mjpeg` | fluide en `webrtc` |
+| Son descendant | non (MJPEG n'a pas d'audio) | oui |
+| Push-to-talk | **impossible** | oui |
+| Aperçu sur l'écran du P4 | oui | non |
+| Charge CPU côté Home Assistant | transcodage permanent | nulle |
+
 ## 4 bis. Les sept conditions du push-to-talk (Advanced Camera Card)
 
 La documentation de la carte les pose comme **toutes obligatoires**. Il n'y a

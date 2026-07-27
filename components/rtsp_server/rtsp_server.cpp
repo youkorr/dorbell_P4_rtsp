@@ -370,6 +370,22 @@ bool RTSPServer::open_listener_() {
   return true;
 }
 
+void RTSPServer::refresh_negotiated_mask_() {
+  // OR across every PLAYing session, not just the last one to arrive. With a
+  // transcoding chain the device serves two connections -- one pulling video,
+  // one holding the backchannel -- and reporting only the most recent made the
+  // backchannel look absent while another session had it.
+  uint8_t mask = 0;
+  for (const auto &s : this->sessions_) {
+    if (!s->playing || s->fd < 0)
+      continue;
+    for (int k = 0; k < 3; k++)
+      if (s->setup[k])
+        mask |= static_cast<uint8_t>(1u << k);
+  }
+  this->negotiated_mask_ = mask;
+}
+
 void RTSPServer::log_status_() {
   const uint8_t mask = this->negotiated_mask_;
   const auto yn = [](bool b) { return b ? "yes" : "NO "; };
@@ -439,6 +455,7 @@ void RTSPServer::network_run_() {
         this->close_session_(i - 1);
     }
 
+    this->refresh_negotiated_mask_();
     this->drain_tx_ring_();
   }
 }
@@ -706,14 +723,7 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
       this->active_streams_++;
     }
 
-    // Snapshot of what this client actually negotiated, as a single byte the
-    // main loop can read without touching `sessions_` (owned by this task).
-    // This is what answers "did the card ask for the backchannel at all?".
-    uint8_t mask = 0;
-    for (int k = 0; k < 3; k++)
-      if (session.setup[k])
-        mask |= static_cast<uint8_t>(1u << k);
-    this->negotiated_mask_ = mask;
+    this->refresh_negotiated_mask_();
 
     char extra[96];
     snprintf(extra, sizeof(extra), "Session: %s\r\nRange: npt=0.000-\r\n", session.session_id.c_str());
