@@ -341,6 +341,7 @@ FINAL_VALIDATE_SCHEMA = _final_validate
         },
         key=CONF_STATE,
     ),
+    synchronous=True,
 )
 async def set_loopback_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg, await cg.get_variable(config[CONF_ID]))
@@ -358,6 +359,7 @@ async def set_loopback_to_code(config, action_id, template_arg, args):
             cv.Optional(CONF_DURATION, default="500ms"): cv.positive_time_period_milliseconds,
         }
     ),
+    synchronous=True,
 )
 async def play_test_tone_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg, await cg.get_variable(config[CONF_ID]))

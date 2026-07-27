@@ -592,3 +592,4 @@ Et pour la voix **descendante** (Home Assistant → sonnette), le capteur
 | Image fluide mais CPU élevé sur la machine HA | c'est le transcodage MJPEG → H.264 de ffmpeg, inévitable pour WebRTC. Baissez `framerate` ou `jpeg_quality` sur le P4, ou regardez la caméra en mode `mjpeg`/`mse` plutôt qu'en `webrtc` |
 | Pas d'image dans la carte, mais `doorbell` visible dans go2rtc | la carte pointe sur `doorbell` alors que le P4 est en MJPEG : utilisez `doorbell_webrtc` |
 | `RTSP: unsupported transport` | un client force l'UDP ; ce serveur est en TCP interleaved uniquement |
+| `Unable to find action with the name 'rtsp_server.…'` | ESPHome compile une ancienne copie du composant : mauvais `ref:` dans votre YAML, ou cache de 24 h. Mettez `refresh: 0s` sur le bloc `source:` et supprimez `.esphome/external_components` — voir le README |

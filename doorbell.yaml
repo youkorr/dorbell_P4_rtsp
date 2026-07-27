@@ -38,17 +38,26 @@ esp32:
 
 # NOTE: `rtsp_server` vit pour l'instant sur la branche de travail ci-dessous.
 # Une fois la PR fusionnee, remplacez ces deux `ref:` par `main`.
+#
+# `refresh: 0s` n'est pas cosmetique. Par defaut ESPHome garde un clone en cache
+# pendant UN JOUR, et il est indexe sur le NOM de la branche, pas sur le commit :
+# si la branche avance, une compilation faite dans les 24 h precedentes continue
+# d'utiliser l'ancien code, en silence. C'est ce qui produit des erreurs du genre
+# « Unable to find action with the name 'rtsp_server.play_test_tone' » alors que
+# l'action existe bel et bien dans le depot.
 external_components:
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
       ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [rtsp_server]
+    refresh: 0s
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
       ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [esp_video]
+    refresh: 0s
 
 logger:
   level: INFO

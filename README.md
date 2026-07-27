@@ -91,6 +91,34 @@ rtsp_server:
       dout_pin: GPIO27
 ```
 
+### « Unable to find action with the name 'rtsp_server.play_test_tone' »
+
+L'action existe : ce message veut dire qu'ESPHome compile une **ancienne copie**
+du composant. Deux causes, souvent combinées.
+
+**1. Le `ref:` de votre YAML pointe ailleurs.** `external_components` ne récupère
+que `components/`, jamais les fichiers YAML : votre copie dans
+`/config/esphome/` garde le `ref:` que vous y aviez mis. Vérifiez qu'il dit bien
+`claude/doorbell-p4-rtsp-audio-gkdosc`.
+
+**2. Le cache d'ESPHome.** Par défaut il garde un clone **un jour entier**, et il
+est indexé sur le *nom* de la branche, pas sur le commit. Une branche qui avance
+ne suffit donc pas : tant que le cache est valide, l'ancien code est réutilisé
+en silence. D'où le `refresh: 0s` sur chaque bloc `source:` des exemples.
+
+Si l'erreur persiste, videz le cache à la main :
+
+```bash
+rm -rf /config/esphome/.esphome/external_components
+```
+
+(ou, dans le module complémentaire ESPHome, le dossier `.esphome/external_components`
+à côté de vos YAML), puis recompilez.
+
+Pour vérifier que le bon code est arrivé, la sortie de `esphome logs` au
+démarrage doit montrer les lignes `Backchannel:` et `Half duplex:` dans le
+`dump_config` du serveur RTSP.
+
 Deux configurations complètes et commentées :
 
 - [`doorbell.yaml`](doorbell.yaml) — sonnette *headless* (sans écran), micro
