@@ -86,6 +86,42 @@ int main() {
   assert((c3.pkts[0].data[1] & 0x7F) == 0 && (c3.pkts[0].data[1] & 0x80));
   printf("g711 rtp OK (172 bytes = 12 hdr + 160 payload)\n");
 
+  // --- invariant relied upon by RTSPServer::send_rtp ------------------------
+  // Frame-aligned dropping finds the end of a video frame by reading the RTP
+  // marker at buf[INTERLEAVED_HEADER_SIZE + 1], on the buffer as handed to
+  // send_rtp -- i.e. INCLUDING the 4-byte interleaved header, which the other
+  // collectors above strip. If that offset moved, or if a packetizer stopped
+  // marking the last fragment, the server would drop from the middle of one
+  // frame into the next instead of resuming cleanly.
+  {
+    struct RawCollector : RtpSender {
+      std::vector<std::vector<uint8_t>> pkts;
+      void send_rtp(StreamKind, uint8_t *buf, size_t rtp_len) override {
+        pkts.push_back(std::vector<uint8_t>(buf, buf + INTERLEAVED_HEADER_SIZE + rtp_len));
+      }
+    };
+
+    RawCollector rc;
+    H264Packetizer p4(1400, 96, 7);
+    p4.packetize(big.data(), big.size(), 0, &rc);
+    assert(rc.pkts.size() > 1);  // must actually fragment, or this proves nothing
+    for (size_t i = 0; i < rc.pkts.size(); i++) {
+      const bool marker = (rc.pkts[i][INTERLEAVED_HEADER_SIZE + 1] & 0x80) != 0;
+      assert(marker == (i + 1 == rc.pkts.size()));
+    }
+
+    // Audio marks every packet, which is why send_rtp only applies the policy
+    // to StreamKind::VIDEO.
+    RawCollector ra;
+    G711Packetizer g2(160, 0, 42);
+    g2.packetize(pcm.data(), 160, 0, &ra);
+    assert(ra.pkts.size() == 1);
+    assert((ra.pkts[0][INTERLEAVED_HEADER_SIZE + 1] & 0x80) != 0);
+
+    printf("frame-end marker at buf[%zu] (%zu video frags, audio always marked)\n",
+           static_cast<size_t>(INTERLEAVED_HEADER_SIZE) + 1, rc.pkts.size());
+  }
+
   printf("\nall checks passed\n");
   return 0;
 }

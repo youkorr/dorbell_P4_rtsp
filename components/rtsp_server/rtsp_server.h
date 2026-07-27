@@ -150,6 +150,10 @@ class RTSPServer : public Component, public RtpSender {
   volatile uint8_t client_count_{0};
   volatile uint8_t active_streams_{0};
   volatile uint32_t tx_overflows_{0};
+  volatile uint32_t tx_frames_dropped_{0};
+  /// Set when a video frame could not be queued whole: the rest of that frame
+  /// is discarded so the receiver never sees a fragment with a hole in it.
+  bool tx_dropping_frame_{false};
   volatile uint32_t jpeg_parse_errors_{0};
 
   // Edge detection performed on the main loop so triggers never fire from a

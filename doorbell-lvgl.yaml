@@ -242,6 +242,15 @@ rtsp_server:
     # de lire la trame courante. Mettez true si vous retirez l'aperçu LVGL.
     drive_camera: false
     framerate: 15
+    # 1..100. Le débit monte très vite avec ce réglage, et le WiFi du P4 passe
+    # par l'ESP32-C6 en SDIO : au-delà d'environ 8 Mb/s le tampon d'émission
+    # sature et des trames entières sont jetées (le composant le journalise).
+    # À 800x640, q25 donne ~40-60 ko par trame, soit ~6 Mb/s à 15 fps.
+    #
+    # Une image qui semble « pixelisée » n'est pas forcément un manque de
+    # qualité : vérifiez d'abord les logs. Des trames jetées, ou des
+    # « [mjpeg] error dc » côté go2rtc, produisent une image déchirée que
+    # monter la qualité ne fait qu'aggraver, en saturant davantage le lien.
     jpeg_quality: 25
     # --- Option H.264 (test) -------------------------------------------------
     # H.264 lit du YUV420 directement sur /dev/video0 et ne peut donc PAS

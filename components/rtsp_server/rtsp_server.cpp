@@ -292,11 +292,35 @@ void RTSPServer::send_rtp(StreamKind kind, uint8_t *buf, size_t rtp_len) {
   buf[2] = static_cast<uint8_t>(rtp_len >> 8);
   buf[3] = static_cast<uint8_t>(rtp_len);
 
-  // Never block a pipeline task on the network: drop instead. A dropped packet
-  // costs at most one GOP of video, a full stall costs frames forever.
+  // The RTP marker sits on the last packet of a video frame, for both RFC 2435
+  // and RFC 6184. (Audio sets it on every packet, hence the kind check below.)
+  const bool video = kind == StreamKind::VIDEO;
+  const bool last_of_frame = (buf[INTERLEAVED_HEADER_SIZE + 1] & 0x80) != 0;
+
+  // Never block a pipeline task on the network: drop instead. But drop WHOLE
+  // frames rather than isolated packets. A JPEG missing a fragment from its
+  // middle is not a slightly worse picture: the decoder resynchronises on
+  // whatever bytes follow and paints parts of two frames at once, which is the
+  // "torn" or "doubled" image seen on the receiver. Truncating at the overflow
+  // point and resuming cleanly on the next frame costs frames, not coherence.
+  if (video && this->tx_dropping_frame_) {
+    this->tx_overflows_++;
+    if (last_of_frame)
+      this->tx_dropping_frame_ = false;  // the next frame starts clean
+    return;
+  }
+
   if (xRingbufferSend(this->tx_ring_, buf, INTERLEAVED_HEADER_SIZE + rtp_len, 0) != pdTRUE) {
-    if ((this->tx_overflows_++ % 100) == 0)
-      ESP_LOGW(TAG, "transmit ring buffer full, dropping RTP packets (%" PRIu32 " so far)", this->tx_overflows_);
+    if (video && !last_of_frame) {
+      this->tx_dropping_frame_ = true;
+      this->tx_frames_dropped_++;
+    }
+    if ((this->tx_overflows_++ % 100) == 0) {
+      ESP_LOGW(TAG,
+               "transmit ring buffer full: the link cannot carry the stream. "
+               "%" PRIu32 " packets / %" PRIu32 " frames dropped. Lower 'jpeg_quality' or 'framerate'.",
+               this->tx_overflows_, this->tx_frames_dropped_);
+    }
   }
 }
 
