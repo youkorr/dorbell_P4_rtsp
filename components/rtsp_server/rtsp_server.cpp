@@ -506,10 +506,22 @@ void RTSPServer::service_session_(RtspSession &session) {
 void RTSPServer::handle_interleaved_(RtspSession &session, uint8_t channel, const uint8_t *payload, size_t len) {
   // Only the backchannel carries client-to-server RTP; anything else is RTCP
   // that we deliberately ignore.
-  if (!session.setup[static_cast<int>(StreamKind::BACKCHANNEL)])
+  //
+  // These three rejections used to be silent, which made "I press talk and
+  // nothing comes out" impossible to place: the device could not say whether it
+  // received nothing at all, or received and discarded. They now leave a trace,
+  // rate-limited because RTCP arrives regularly on a healthy session.
+  if (!session.setup[static_cast<int>(StreamKind::BACKCHANNEL)]) {
+    if ((this->stray_rtp_++ % 200) == 0) {
+      ESP_LOGW(TAG,
+               "incoming RTP on channel %u but no backchannel was set up: the client never asked for it "
+               "(missing 'Require: www.onvif.org/ver20/backchannel' on DESCRIBE)",
+               channel);
+    }
     return;
+  }
   if (channel != session.channel[static_cast<int>(StreamKind::BACKCHANNEL)])
-    return;
+    return;  // RTCP for the outgoing tracks, expected and uninteresting
   if (len <= RTP_HEADER_SIZE)
     return;
 
@@ -524,6 +536,14 @@ void RTSPServer::handle_interleaved_(RtspSession &session, uint8_t channel, cons
   }
   if (offset >= len)
     return;
+
+  // One line at the start of each talk burst. `is_talking()` is still false
+  // until play_g711 records this packet, so this fires once per burst rather
+  // than on every 20 ms packet. C'est LA preuve, cote appareil, que la voix
+  // descendante arrive jusqu'ici -- sans avoir a interroger le navigateur.
+  if (!this->audio_.is_talking())
+    ESP_LOGI(TAG, "backchannel: incoming audio from the client (%u byte payload)",
+             static_cast<unsigned>(len - offset));
 
   this->audio_.play_g711(payload + offset, len - offset);
 }
