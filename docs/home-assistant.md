@@ -255,6 +255,51 @@ ui: true
 `microphone` dans `media` est ce qui fait apparaître le bouton micro et
 déclenche la négociation du backchannel. Sans lui, le flux reste descendant.
 
+## 4 bis. Les sept conditions du push-to-talk (Advanced Camera Card)
+
+La documentation de la carte les pose comme **toutes obligatoires**. Il n'y a
+pas de dégradé : si une seule manque, le bouton micro n'est pas grisé, il
+**n'apparaît pas du tout** — ce qui donne l'impression d'un bug alors que c'est
+la configuration.
+
+| # | Condition |
+|---|---|
+| 1 | La caméra a une sortie audio |
+| 2 | go2rtc sait faire l'audio bidirectionnel avec elle |
+| 3 | Home Assistant est accessible en **HTTPS** |
+| 4 | **Caméra de type Frigate uniquement** — pas une Generic Camera |
+| 5 | **`live_provider: go2rtc` uniquement** — jamais `ha` |
+| 6 | **`modes: [webrtc]` uniquement** |
+| 7 | Le bouton micro est activé dans `menu.buttons` |
+
+La 6 a une conséquence qu'on découvre tard : **le mode `mjpeg` exclut le
+push-to-talk par construction**. Se rabattre sur MJPEG parce que le WebRTC
+saccade revient à renoncer à la parole. Corriger le WebRTC n'est donc pas un
+confort, c'est un prérequis.
+
+La carte minimale à faire fonctionner AVANT d'ajouter déclencheurs et éléments
+personnalisés :
+
+```yaml
+type: custom:advanced-camera-card
+cameras:
+  - camera_entity: camera.doorbell
+    live_provider: go2rtc
+    go2rtc:
+      modes:
+        - webrtc
+menu:
+  style: outside
+  buttons:
+    microphone:
+      enabled: true
+      type: momentary
+```
+
+Si le bouton micro n'apparaît pas avec ça, c'est la condition 4 : vérifiez que
+l'entité vient bien de l'intégration Frigate, et rechargez-la après tout ajout
+de caméra dans `frigate.yaml`.
+
 ## 5. Carte Lovelace — Advanced Camera Card
 
 La carte que vous visez ([card.camera](https://card.camera/#/examples?id=doorbell)),
