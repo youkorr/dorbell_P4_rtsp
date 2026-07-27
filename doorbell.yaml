@@ -1,0 +1,216 @@
+# NOTE : ce fichier est un EXEMPLE à copier dans /config/esphome/.
+# `external_components` ne récupère que `components/`, pas ce YAML : après une
+# mise à jour du dépôt, recopiez ce fichier si vous voulez les corrections.
+# ESP32-P4 smart doorbell: MIPI-CSI camera + RTSP with two-way audio.
+#
+#   OV5647 --MIPI CSI--> ESP32-P4 --MJPEG/RTSP--> go2rtc --WebRTC--> Home Assistant
+#                              <----- G.711 backchannel (talk) -----
+#
+# Everything below the camera and the audio (button, chime relay, LED, OTA...)
+# is plain ESPHome, exactly as in the rest of the project.
+
+substitutions:
+  name: doorbell-p4
+  friendly_name: Sonnette
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.5.0
+
+esp32:
+  variant: esp32p4
+  framework:
+    type: esp-idf
+    # The MIPI-CSI stack, the hardware H.264 encoder and the new I2S driver all
+    # need a recent IDF.
+    version: 5.4.0
+    sdkconfig_options:
+      # H.264 frame buffers and the camera buffers live in PSRAM.
+      CONFIG_SPIRAM: y
+      CONFIG_SPIRAM_MODE_HEX: y
+      CONFIG_SPIRAM_SPEED_200M: y
+      CONFIG_SPIRAM_USE_MALLOC: y
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360: y
+      # The RTSP task pushes RTP straight into lwIP; give it room to breathe.
+      CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+
+# NOTE: `rtsp_server` et l'option `enable_h264` d'esp_video vivent pour l'instant
+# sur la branche de travail ci-dessous. Une fois la PR fusionnee, remplacez ces
+# deux `ref:` par `main`.
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/dorbell_P4_rtsp
+      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
+    components: [rtsp_server]
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
+    components: [esp_video]
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# On an ESP32-P4 the radio lives in the ESP32-C6 companion; this is the usual
+# esp-hosted setup, adjust to your board.
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+# ---------------------------------------------------------------------------
+# Camera
+# ---------------------------------------------------------------------------
+
+# SCCB/I2C bus the sensor is configured over. Shared with esp_video so there is
+# no second driver fighting for the bus.
+i2c:
+  - id: cam_i2c
+    sda: GPIO7
+    scl: GPIO8
+    frequency: 100kHz
+    scan: false
+
+esp_video:
+  id: video
+  i2c_id: cam_i2c
+  xclk_pin: GPIO36 # -1 if your board has its own 24 MHz oscillator
+  xclk_freq: 24000000
+  enable_isp: true # RAW -> RGB565 conversion, feeds the JPEG encoder
+  # MJPEG uses the ESP-IDF hardware JPEG driver directly, so neither
+  # enable_jpeg (/dev/video10) nor enable_h264 (/dev/video11) is required.
+  # Set enable_h264: true only if you switch rtsp_server to `codec: h264`.
+  enable_h264: false
+
+# ---------------------------------------------------------------------------
+# RTSP server (video + two-way audio)
+# ---------------------------------------------------------------------------
+
+rtsp_server:
+  id: doorbell_stream
+  port: 8554
+  path: /doorbell
+  username: !secret rtsp_username
+  password: !secret rtsp_password
+  # En MJPEG, go2rtc ouvre DEUX sessions RTSP (le transcodage H.264 + le
+  # backchannel). 3 laisse de la marge pour un VLC de diagnostic.
+  max_clients: 3
+
+  video:
+    codec: mjpeg # hardware JPEG encoder; H.264 is an option, see below
+    framerate: 15
+    jpeg_quality: 25 # 1..100; ~25 keeps a frame around 40-60 kB
+    # --- Option H.264 (test) -------------------------------------------------
+    # Halves the bandwidth and lets go2rtc hand the stream to WebRTC without
+    # transcoding. Needs `enable_h264: true` on esp_video above, and a sensor
+    # resolution whose width AND height are multiples of 16.
+    # codec: h264
+    # bitrate: 1500000   # the hardware encoder caps at 2.5 Mbps
+    # gop: 15            # one key frame per second -> clients start fast
+    # min_qp: 25
+    # max_qp: 40
+
+  audio:
+    codec: pcmu # G.711 µ-law: no transcoding anywhere in the chain
+    sample_rate: 16000 # I2S clock; the wire is always 8 kHz
+
+    microphone: # INMP441 / ICS-43434
+      mode: std
+      i2s_port: 0
+      bclk_pin: GPIO20
+      lrclk_pin: GPIO21
+      din_pin: GPIO22
+      bits_per_sample: 32
+      channel: left # L/R pin tied to GND
+      gain: 6.0
+
+    speaker: # MAX98357A
+      i2s_port: 1
+      bclk_pin: GPIO23
+      lrclk_pin: GPIO26
+      dout_pin: GPIO27
+      bits_per_sample: 16
+      channel: left
+      volume: 0.8
+
+    # There is no acoustic echo canceller: mute the microphone while the far
+    # end is talking so the speaker cannot loop back into it.
+    half_duplex: true
+    talk_timeout: 300ms
+
+  on_talk_start:
+    - switch.turn_on: amp_enable
+    - light.turn_on: status_led
+  on_talk_end:
+    - switch.turn_off: amp_enable
+    - light.turn_off: status_led
+
+# ---------------------------------------------------------------------------
+# Doorbell button, chime and indicators — ordinary ESPHome
+# ---------------------------------------------------------------------------
+
+binary_sensor:
+  - platform: gpio
+    id: doorbell_button
+    name: "Bouton"
+    pin:
+      number: GPIO32
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 100ms
+    on_press:
+      # Ring the local chime, then let Home Assistant do the notification.
+      - switch.turn_on: chime_relay
+      - delay: 1s
+      - switch.turn_off: chime_relay
+
+switch:
+  - platform: gpio
+    id: chime_relay
+    name: "Carillon"
+    pin: GPIO33
+    restore_mode: ALWAYS_OFF
+
+  # Shutdown pin of the MAX98357A. Keeping the amplifier off except while
+  # talking removes idle hiss and stops it from feeding the microphone.
+  - platform: gpio
+    id: amp_enable
+    pin: GPIO28
+    restore_mode: ALWAYS_OFF
+
+light:
+  - platform: status_led
+    id: status_led
+    pin: GPIO45
+
+text_sensor:
+  - platform: template
+    name: "Flux RTSP"
+    lambda: 'return {id(doorbell_stream).stream_url()};'
+    update_interval: 60s
+
+sensor:
+  - platform: template
+    name: "Clients RTSP"
+    lambda: 'return id(doorbell_stream).client_count();'
+    update_interval: 10s
+    accuracy_decimals: 0

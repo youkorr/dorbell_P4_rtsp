@@ -1,0 +1,90 @@
+# go2rtc configuration for the ESP32-P4 doorbell.
+#
+# Place this at /config/go2rtc.yaml (Home Assistant add-on) or next to the
+# go2rtc binary, then restart go2rtc.
+
+# ---------------------------------------------------------------------
+# THE ONE RULE: exactly ONE source may hold the ONVIF backchannel open.
+#
+# go2rtc requests the backchannel by DEFAULT on a bare rtsp:// URL. Adding ANY
+# '#' fragment flips that default off, and you have to ask for it back:
+#
+#   rtsp://.../doorbell                     -> backchannel ON  (default)
+#   rtsp://.../doorbell#media=video,audio   -> backchannel OFF
+#   rtsp://.../doorbell#backchannel=1       -> backchannel ON  (explicit)
+#   rtsp://.../doorbell#backchannel=0       -> backchannel OFF (explicit)
+#
+# Two sources holding it at once is the single most common cause of "two-way
+# audio worked once and then stopped". The MJPEG block below is easy to get
+# wrong precisely here: the transcode source and the backchannel source are
+# two separate RTSP sessions on the same device.
+#
+# Transport is RTP interleaved over TCP, which is go2rtc's default and the only
+# transport the ESP32-P4 server implements. Do not add '#transport=udp'.
+# ---------------------------------------------------------------------
+
+streams:
+  # =====================================================================
+  # A. `codec: mjpeg` on the ESP32-P4 (the default) — TWO RTSP sessions
+  #
+  # WebRTC cannot carry MJPEG. A WebRTC viewer therefore needs the video
+  # transcoded to H.264, and ffmpeg only pulls: it does not carry the
+  # backchannel back to the device. So the talk path needs its own direct
+  # source, and `doorbell` — used only as the transcode input — must give the
+  # backchannel up with '#backchannel=0'.
+  #
+  # The audio is NOT re-encoded: '#audio=copy' passes G.711 straight through,
+  # which is what keeps two-way audio free of a codec round trip.
+  #
+  # This costs TWO client slots on the ESP32-P4, so raise `max_clients` to at
+  # least 3 in the ESPHome YAML (the default of 2 leaves no room for VLC or a
+  # second viewer).
+  #
+  # Add '#hardware' after '#video=h264' only if the machine has a VA-API or
+  # V4L2 encoder; without one it fails outright. On a Raspberry Pi or a small
+  # x86 box, expect the software transcode to cost real CPU.
+  # =====================================================================
+  doorbell:
+    - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=0
+
+  doorbell_webrtc:
+    - ffmpeg:doorbell#video=h264#audio=copy
+    - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=1
+
+  # =====================================================================
+  # B. `codec: h264` on the ESP32-P4 — ONE RTSP session, nothing transcoded
+  #
+  # Delete section A, uncomment this, and point the Lovelace card at
+  # `doorbell`. Note that `codec: h264` cannot share the camera with an LVGL
+  # preview (H.264 reads YUV420 from V4L2, LVGL needs RGB565), so this rules
+  # out the `camera_id:` option in the ESPHome config.
+  # =====================================================================
+  # doorbell:
+  #   - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell
+
+  # Optional: for a consumer that must NOT hold the backchannel open, e.g. a
+  # recorder or a motion detector running alongside the live view.
+  doorbell_view_only:
+    - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=0
+
+# ---------------------------------------------------------------------
+# WebRTC
+#
+# The browser has to reach go2rtc directly over UDP. On a LAN, listing the
+# host's own address as a candidate is enough; 'stun:8555' additionally
+# discovers the public address when you connect from outside.
+# ---------------------------------------------------------------------
+webrtc:
+  listen: ":8555/tcp"
+  candidates:
+    - 192.168.1.10:8555 # <- the IP of the machine running go2rtc
+    - stun:8555
+
+api:
+  listen: ":1984"
+
+log:
+  level: info
+  # Uncomment while bringing the doorbell up: this prints every RTSP request
+  # and response, including the SDP and the backchannel negotiation.
+  # rtsp: trace
