@@ -292,8 +292,12 @@ brut. Le premier suffit presque toujours :
 | `binary_sensor` | `binary_sensor.<appareil>_bouton`, `device_class: occupancy` | les conditions et les cartes qui veulent un on/off. Tenu 5 s pour être visible à l'œil dans Outils de développement → États. |
 | évènement de bus | `esphome.doorbell_pressed` | les automatisations écrites à la main en YAML. |
 
-L'automatisation qui affiche la caméra sur les téléphones est dans
-[`docs/home-assistant.md`](docs/home-assistant.md) §6.
+**Mais publier l'appui ne le fait pas sonner.** Home Assistant ne sonne pas tout
+seul : tant qu'aucune automatisation n'écoute ces entités pour en faire du bruit,
+l'appui ne fait que changer une valeur dans une base de données. Le carillon sur
+une enceinte et la notification avec vignette sont dans
+[`docs/home-assistant.md`](docs/home-assistant.md) §6 ; le parcours complet
+« on appuie → ça sonne → je vois → je réponds » est décrit au §5 bis.
 
 Si rien ne part du tout, le premier point à trancher est *l'appui lui-même* : le
 script de sonnerie journalise `ring: sequence declenchee`. Cette ligne absente

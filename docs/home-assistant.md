@@ -452,7 +452,25 @@ une impulsion de 100 ms ne laisserait pas à la carte le temps de réagir.
 | Bouton micro (parler) | **probablement pas** — voir le §4 ter : la chaîne MJPEG impose deux sources à `doorbell_webrtc`, et la carte n'affiche le bouton que s'il y en a une seule |
 
 Pour parler malgré tout, le plus simple reste la page de go2rtc elle-même, qui
-n'a ni cette contrainte ni celle du HTTPS :
+n'a pas la contrainte du consommateur unique.
+
+> **Elle a en revanche celle du HTTPS, et elle est incontournable.** Un
+> navigateur ne donne accès au micro (`getUserMedia`) que dans un *contexte
+> sécurisé* : HTTPS, ou `localhost`. Une adresse de LAN en clair comme
+> `http://192.168.1.38:1984` n'en est pas un — le bouton micro sera là, et il
+> échouera. Ce n'est pas propre à go2rtc ni à la carte : **aucun** push-to-talk
+> dans un navigateur ne fonctionne sans HTTPS. C'est la condition n°3 du §4 bis,
+> et elle s'applique partout.
+>
+> Trois façons de la satisfaire, de la plus propre à la plus rapide :
+> mettre go2rtc et Home Assistant derrière HTTPS (Nabu Casa, ou un reverse proxy
+> avec un certificat) ; ouvrir la page depuis la machine qui fait tourner go2rtc,
+> où `http://localhost:1984` *est* un contexte sécurisé ; ou déclarer l'origine
+> comme sûre dans le navigateur, pour un essai —
+> `chrome://flags/#unsafely-treat-insecure-origin-as-secure`, y ajouter
+> `http://192.168.1.38:1984`, puis redémarrer Chrome.
+
+L'adresse :
 
 ```
 http://192.168.1.38:1984/stream.html?src=doorbell_webrtc&mode=webrtc&media=video+audio+microphone
@@ -517,6 +535,31 @@ cards:
 Là encore, relevez les `entity_id` réels dans Outils de développement → États
 plutôt que de recopier les miens : ESPHome les construit à partir du nom de
 l'appareil.
+
+## 5 bis. Le parcours complet d'un coup de sonnette
+
+Le principe d'une sonnette, c'est quatre temps : **on appuie → ça sonne quelque
+part → je vois qui c'est → je décroche et je réponds.** Voici où chacun se joue,
+et ce qu'il faut avoir mis en place pour lui.
+
+| Temps | Qui le fait | État |
+|---|---|---|
+| 1. On appuie | le P4 publie `event...sonnette`, `binary_sensor..._bouton` et l'évènement `esphome.doorbell_pressed` | rien à faire, c'est dans le YAML |
+| 2. **Ça sonne** | une **automatisation** Home Assistant : carillon sur une enceinte, notification sur le téléphone | **à écrire — voir §6** |
+| 3. Je vois qui c'est | la carte, avec `triggers:` (§5) et/ou la notification avec vignette | §5 |
+| 4. Je réponds | l'audio bidirectionnel | descendant : oui. Montant : **exige HTTPS** (§4 ter) |
+
+Le temps 2 est celui qu'on oublie, et c'est celui qui donne l'impression que
+« rien ne marche ». **Home Assistant ne sonne pas tout seul.** Le P4 fait
+scrupuleusement son travail — il annonce l'appui de trois façons — mais tant que
+personne n'écoute cette annonce pour en faire du bruit, il ne se passe rien de
+perceptible. Une sonnette sans automatisation, c'est un bouton qui change une
+valeur dans une base de données.
+
+Le temps 4 se heurte, lui, à une contrainte de navigateur et non de ce projet :
+pas de micro sans HTTPS. Entendre le visiteur fonctionne sans rien (le flux
+descend en permanence, cf. §7 bis) ; lui répondre demande d'avoir réglé le
+HTTPS.
 
 ## 6. Automatisation : appui sur le bouton → notification
 
@@ -601,6 +644,63 @@ automation:
 
 L'action `URI` ouvre le tableau de bord directement dans l'application, avec la
 carte caméra et son bouton PTT.
+
+### Faire sonner la maison, pas seulement le téléphone
+
+Une notification ne se voit que si on a le téléphone en main. Pour que ça
+*sonne*, il faut une enceinte. C'est la même automatisation, avec une action de
+plus :
+
+```yaml
+alias: Sonnette - carillon et notification
+mode: single
+triggers:
+  - trigger: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
+actions:
+  # 1. Le carillon, sur l'enceinte du salon. `media_player.play_media` avec un
+  #    fichier depuis /config/www/ (donc servi sous /local/).
+  - action: media_player.play_media
+    target:
+      entity_id: media_player.salon
+    data:
+      media_content_id: /local/sounds/doorbell.mp3
+      media_content_type: music
+
+  # Variante parlée, si vous preferez une annonce a un carillon :
+  # - action: tts.speak
+  #   target:
+  #     entity_id: tts.piper
+  #   data:
+  #     cache: true
+  #     media_player_entity_id: media_player.salon
+  #     message: "Quelqu'un sonne a la porte"
+
+  # 2. Le telephone, avec la vignette et le lien vers la vue.
+  - action: notify.mobile_app_telephone
+    data:
+      title: Sonnette
+      message: Quelqu'un est a la porte
+      data:
+        image: /api/camera_proxy/camera.doorbell
+        actions:
+          - action: URI
+            title: Voir et parler
+            uri: /lovelace/sonnette
+        push:
+          interruption-level: time-sensitive
+        channel: doorbell
+        importance: high
+```
+
+`mode: single` compte : sans lui, un visiteur qui appuie trois fois lance trois
+carillons qui se chevauchent. Ajoutez un `- delay: 10s` en fin d'actions si vous
+voulez en plus un temps mort avant qu'un nouvel appui puisse sonner.
+
+Pour vérifier l'automatisation sans descendre à la porte : **Paramètres →
+Automatisations → ⋮ → Exécuter**. Et pour vérifier toute la chaîne depuis le
+début, le bouton `button...sonner` de l'appareil ESPHome déclenche exactement la
+même séquence que l'appui tactile.
 
 Tableau de bord minimal associé :
 
