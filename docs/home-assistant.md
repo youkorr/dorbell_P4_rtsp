@@ -374,39 +374,149 @@ de caméra dans `frigate.yaml`.
 
 ## 5. Carte Lovelace — Advanced Camera Card
 
-La carte que vous visez ([card.camera](https://card.camera/#/examples?id=doorbell)),
-avec le bouton en mode **momentané**, c'est-à-dire un vrai push-to-talk :
+### D'abord : le nom de la carte a changé
+
+`custom:frigate-card` est l'ancien nom. La carte s'appelle désormais
+**`custom:advanced-camera-card`** (dépôt `dermotduffy/advanced-camera-card`).
+L'ancien nom fonctionne encore sur les installations qui n'ont pas été mises à
+jour, mais toute la documentation actuelle — et les clés ci-dessous — parlent du
+nouveau. Si la carte refuse une clé, c'est presque toujours qu'elle est d'une
+version antérieure : le message d'erreur nomme la clé fautive.
+
+### La carte, avec les valeurs de ce dépôt
+
+Comme la sonnette est déclarée dans `frigate.yaml`, Home Assistant en fait une
+**caméra de type Frigate** (`camera.doorbell`), et la carte découvre go2rtc
+toute seule : pas besoin de renseigner `go2rtc.url`. C'est aussi ce qui satisfait
+la condition n°4 du §4 bis.
 
 ```yaml
 type: custom:advanced-camera-card
 cameras:
-  - camera_entity: camera.sonnette
+  - camera_entity: camera.doorbell
     live_provider: go2rtc
     go2rtc:
-      url: http://192.168.1.10:1984
+      # Le flux transcodé : le P4 émet du MJPEG, que WebRTC ne transporte pas.
+      # Pointer sur `doorbell` donnerait une vue vide en mode webrtc.
       stream: doorbell_webrtc
       modes:
-        - webrtc          # seul mode compatible audio bidirectionnel
+        - webrtc          # seul mode qui porte l'audio
+    # ---- LE point qui relie la sonnerie à la caméra --------------------------
+    # Sans ça, appuyer sur « Sonner » ne fait rien apparaître : une carte caméra
+    # affiche une caméra, elle n'écoute rien d'autre. Ces entités-là, elle les
+    # écoute, et la vue bascule sur le direct quand la sonnette se déclenche.
+    triggers:
+      entities:
+        - binary_sensor.doorbell_p4_lvgl_bouton
+
 live:
-  microphone:
-    always_connected: false   # true = pas de coupure du flux au 1er appui
+  # La vue est prête avant l'appui : sans ça on regarde tourner un spinner
+  # pendant que le visiteur attend.
+  preload: true
   auto_unmute:
-    - microphone
+    - selected
+    - visible
+  microphone:
+    always_connected: false
+
+view:
+  default: live
+  triggers:
+    show_trigger_status: true
+    actions:
+      trigger: live          # la sonnerie amène la vue en direct
+      untrigger: default     # et on revient à la vue normale ensuite
+  # Combien de temps la vue reste sur le direct après la fin de l'appui.
+  interaction_seconds: 30
+
 menu:
   buttons:
     microphone:
       enabled: true
-      type: momentary       # maintenir pour parler ; 'toggle' pour un verrou
+      type: momentary        # maintenir pour parler ; 'toggle' pour un verrou
 ```
 
-`type: momentary` est le comportement PTT ; `toggle` transforme le bouton en
-interrupteur marche/arrêt.
+`binary_sensor.doorbell_p4_lvgl_bouton` suppose `name: doorbell-p4-lvgl` dans
+votre YAML ESPHome. Vérifiez l'identifiant exact dans **Outils de développement →
+États** en filtrant sur `bouton` — c'est le nom de l'appareil qui le construit,
+pas le `friendly_name`. C'est ici que le capteur tenu 5 s prend tout son sens :
+une impulsion de 100 ms ne laisserait pas à la carte le temps de réagir.
 
-> La documentation de la carte indique que l'audio bidirectionnel n'est
-> officiellement supporté que pour les caméras de type Frigate. Avec une caméra
-> générique il faut renseigner explicitement `go2rtc.url` et `go2rtc.stream`
-> comme ci-dessus. Si le bouton micro reste inactif, repliez-vous sur
-> `custom:webrtc-camera`, qui n'a pas cette restriction.
+### Ce que cette carte donnera, et ce qu'elle ne donnera pas
+
+| | |
+|---|---|
+| Image en direct | oui, en mode `webrtc` via `doorbell_webrtc` |
+| Son descendant (entendre le visiteur) | oui — pensez à couper le mute, les navigateurs démarrent muets |
+| La carte réagit à l'appui | oui, via `triggers` ci-dessus |
+| Bouton micro (parler) | **probablement pas** — voir le §4 ter : la chaîne MJPEG impose deux sources à `doorbell_webrtc`, et la carte n'affiche le bouton que s'il y en a une seule |
+
+Pour parler malgré tout, le plus simple reste la page de go2rtc elle-même, qui
+n'a ni cette contrainte ni celle du HTTPS :
+
+```
+http://192.168.1.38:1984/stream.html?src=doorbell_webrtc&mode=webrtc&media=video+audio+microphone
+```
+
+Elle s'intègre au tableau de bord avec une carte `iframe` ordinaire :
+
+```yaml
+type: iframe
+url: http://192.168.1.38:1984/stream.html?src=doorbell_webrtc&mode=webrtc&media=video+audio+microphone
+aspect_ratio: 75%
+```
+
+### Une carte complète, sonnerie et diagnostic compris
+
+```yaml
+type: vertical-stack
+cards:
+  - type: custom:advanced-camera-card
+    cameras:
+      - camera_entity: camera.doorbell
+        live_provider: go2rtc
+        go2rtc:
+          stream: doorbell_webrtc
+          modes: [webrtc]
+        triggers:
+          entities:
+            - binary_sensor.doorbell_p4_lvgl_bouton
+    live:
+      preload: true
+      auto_unmute: [selected, visible]
+    view:
+      default: live
+      triggers:
+        actions:
+          trigger: live
+          untrigger: default
+
+  # Le dernier appui, horodaté. C'est l'entité sonnette native de Home
+  # Assistant : elle ne peut pas rater un appui, contrairement au capteur.
+  - type: entities
+    entities:
+      - entity: event.doorbell_p4_lvgl_sonnette
+        name: Dernier appui
+      - entity: button.doorbell_p4_lvgl_sonner
+        name: Sonner (test)
+
+  # Le repli pour parler, et de quoi voir si l'audio va bien.
+  - type: entities
+    title: Audio
+    entities:
+      - entity: sensor.doorbell_p4_lvgl_niveau_micro
+        name: Niveau micro
+      - entity: sensor.doorbell_p4_lvgl_paquets_audio_recus
+        name: Voix descendante reçue
+      - entity: switch.doorbell_p4_lvgl_test_audio_boucle_micro_vers_haut_parleur
+        name: Test audio (boucle)
+      - entity: button.doorbell_p4_lvgl_bip_de_test
+        name: Bip de test
+```
+
+Là encore, relevez les `entity_id` réels dans Outils de développement → États
+plutôt que de recopier les miens : ESPHome les construit à partir du nom de
+l'appareil.
 
 ## 6. Automatisation : appui sur le bouton → notification
 
@@ -431,18 +541,17 @@ automatisation, le premier est de loin le meilleur :
 | évènement `esphome.doorbell_pressed` | déclencheur brut, si vous préférez ne dépendre d'aucune entité. |
 
 ```yaml
-# Recommandé : l'entité `event`.
-automation:
-  - alias: Sonnette - notification
-    trigger:
-      - platform: state
-        entity_id: event.doorbell_p4_lvgl_sonnette
-    ...
+# Recommandé : l'entité `event`. Tout changement d'état = un nouvel appui.
+trigger:
+  - platform: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
+```
 
-# Variante : l'évènement de bus, si vous ne voulez pas chercher un entity_id.
-    trigger:
-      - platform: event
-        event_type: esphome.doorbell_pressed
+```yaml
+# Variante : l'évènement de bus, si vous préférez ne dépendre d'aucun entity_id.
+trigger:
+  - platform: event
+    event_type: esphome.doorbell_pressed
 ```
 
 ### Trouver les identifiants

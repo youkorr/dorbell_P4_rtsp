@@ -96,6 +96,28 @@ sys.exit(1 if bad else 0)
 PY
 then :; else fail=1; fi
 
+# Every fenced yaml block in the docs is there to be copy-pasted. One that does
+# not parse costs the reader more time than no example at all -- the automation
+# snippet in home-assistant.md was invalid for exactly this reason.
+if python3 - <<'PYEOF'
+import glob, re, sys, yaml
+
+bad = 0
+fence = "```" + "yaml"
+for path in sorted(glob.glob("*.md") + glob.glob("docs/*.md")):
+    blocks = re.findall(fence + r"\n(.*?)" + "```", open(path).read(), re.S)
+    for n, block in enumerate(blocks, 1):
+        try:
+            yaml.safe_load(block)
+        except Exception as e:
+            bad += 1
+            print(f"  FAILED: {path}: yaml block {n}: {str(e).splitlines()[0]}")
+    if blocks:
+        print(f"  OK   {path}: {len(blocks)} yaml blocks parse")
+sys.exit(1 if bad else 0)
+PYEOF
+then :; else fail=1; fi
+
 echo
 echo "== YAML pins =="
 # A GPIO claimed twice in one config is accepted by every check above and only
