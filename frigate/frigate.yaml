@@ -1,24 +1,16 @@
-# Frigate — configuration minimale pour la sonnette ESP32-P4.
+# Frigate — configuration complète avec la sonnette ESP32-P4.
 #
 # À placer dans /config/frigate.yaml, puis redémarrer Frigate.
 #
-# Volontairement réduite au strict nécessaire : moins de clés, moins de
-# validation à échouer. Les options avancées (semantic_search, face_recognition,
-# lpr, classification, notifications, réglages fins d'enregistrement) sont
-# absentes — rajoutez-les une par une APRÈS que cette base démarre, jamais
-# toutes en même temps. Une seule clé refusée invalide le fichier entier.
+# TROIS VALEURS À REMPLACER avant le premier démarrage :
+#   MOT_DE_PASSE_MQTT       broker MQTT
+#   MOT_DE_PASSE_TAPO       caméra Tapo
+#   MOT_DE_PASSE_SONNETTE   `password:` du bloc `rtsp_server:` de l'ESPHome
+#   100.X.Y.Z               adresse Tailscale de CETTE machine (`tailscale ip -4`),
+#                           ou supprimez la ligne si vous n'accédez qu'en local
 #
-# ---------------------------------------------------------------------------
-# TROIS VALEURS À REMPLACER, toutes en MAJUSCULES ci-dessous :
-#
-#   MOT_DE_PASSE_MQTT        mot de passe du broker
-#   MOT_DE_PASSE_TAPO        caméra Tapo
-#   MOT_DE_PASSE_SONNETTE    `password:` du bloc `rtsp_server:` de l'ESPHome
-#
-# Elles sont écrites en clair : ce sont de simples chaînes, pas la substitution
-# {FRIGATE_...} qui fait rejeter TOUTE la configuration quand la variable
-# d'environnement n'existe pas — sans jamais dire laquelle manque.
-# ---------------------------------------------------------------------------
+# N'utilisez PAS l'add-on go2rtc en parallèle : Frigate embarque le sien et les
+# deux se disputeraient les ports.
 
 version: 0.17-0
 
@@ -27,61 +19,144 @@ mqtt:
   port: 1883
   user: frigate
   password: MOT_DE_PASSE_MQTT
+  stats_interval: 60
 
 detectors:
   coral:
     type: edgetpu
     device: pci
 
+birdseye:
+  enabled: false
+
 # ---------------------------------------------------------------------------
-# go2rtc — embarqué dans Frigate, configuré ici.
-# N'utilisez PAS l'add-on go2rtc en plus : les deux se disputent les ports.
+# go2rtc — embarqué dans Frigate, configuré ici
 # ---------------------------------------------------------------------------
 go2rtc:
   streams:
+    # --- Caméra Tapo ---------------------------------------------------------
     frigate1:
       - rtsp://Tapoone:MOT_DE_PASSE_TAPO@192.168.1.13:554/stream1
       - ffmpeg:frigate1#audio=aac
 
+    # Flux MJPEG réduit, consommé par un écran ESP32.
     frigate1_esp32:
       - ffmpeg:rtsp://Tapoone:MOT_DE_PASSE_TAPO@192.168.1.13:554/stream2#video=mjpeg#width=640#height=480#q:v=5#huffman=0#fps=15
 
-    # Entrée du transcodage. `#backchannel=0` est obligatoire : une SEULE source
-    # doit tenir le backchannel ONVIF ouvert, sinon le push-to-talk marche une
-    # fois puis plus jamais. C'est doorbell_webrtc qui le porte, plus bas.
+    # --- Sonnette ESP32-P4, en MJPEG -----------------------------------------
+    # Entrée du transcodage. `#backchannel=0` est obligatoire : une seule source
+    # doit tenir le backchannel ONVIF, sinon le push-to-talk marche une fois
+    # puis plus jamais. C'est doorbell_webrtc qui le porte.
     doorbell:
       - rtsp://1169:MOT_DE_PASSE_SONNETTE@192.168.1.9:8554/doorbell#backchannel=0
 
-    # WebRTC ne transporte pas de MJPEG : la vidéo doit passer en H.264.
-    #   -r 15  cadence constante. Les horodatages du P4 viennent d'un timer
-    #          logiciel ; irréguliers, ils donnent des saccades en WebRTC (MSE
-    #          les tolère, d'où une interface Frigate fluide et une carte hachée
-    #          sur le même flux).
-    #   -g 15  une image clé par seconde, contre 3,3 s avec le -g 50 par défaut.
+    # WebRTC ne transporte pas de MJPEG, d'où le transcodage H.264.
+    #   -r 15 / -g 15  cadence constante et une image clé par seconde. Sans ça
+    #                  les horodatages du P4, issus d'un timer logiciel, donnent
+    #                  des saccades en WebRTC (MSE, plus tolérant, ne le montre
+    #                  pas — d'où une interface Frigate fluide et une carte
+    #                  hachée sur le même flux).
     # Pas de `#audio=copy` : ffmpeg n'a pas de piste audio à copier ici et
-    # sortirait en erreur, que go2rtc relancerait en boucle. L'audio et le
-    # backchannel arrivent par la seconde source, en G.711 intact.
+    # sortirait en erreur, que go2rtc relancerait en boucle.
+    # La seconde ligne apporte le micro ET le backchannel, en G.711 intact.
     doorbell_webrtc:
       - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
       - rtsp://1169:MOT_DE_PASSE_SONNETTE@192.168.1.9:8554/doorbell#backchannel=1
 
+    # --- Variante H.264 ------------------------------------------------------
+    # Ce montage à deux sources fait DEUX consommateurs, et l'Advanced Camera
+    # Card n'affiche son bouton micro que s'il y en a un seul. Le push-to-talk
+    # y est donc hors d'atteinte, quel que soit le réglage.
+    #
+    # Pour l'obtenir, passez le P4 en `codec: h264` (avec `enable_h264: true` sur
+    # esp_video) : plus de transcodage, donc une seule source. Remplacez alors
+    # les deux blocs ci-dessus par celui-ci, et pointez la caméra `doorbell`
+    # plus bas sur `doorbell` au lieu de `doorbell_webrtc` (chemin ffmpeg ET
+    # live.streams).
+    #
+    # Le coût : `codec: h264` lit du YUV420 sur le V4L2 et ne peut pas partager
+    # la caméra avec lvgl_camera_display, qui veut du RGB565. L'aperçu local sur
+    # l'écran du P4 disparaît.
+    #
+    # doorbell:
+    #   - rtsp://1169:MOT_DE_PASSE_SONNETTE@192.168.1.9:8554/doorbell
+
   webrtc:
     listen: :8555
-    # Le navigateur doit pouvoir joindre AU MOINS un de ces candidats. Gardez
-    # les deux : le LAN quand vous êtes à la maison, le tailnet à distance.
-    # L'adresse 100.x s'obtient par `tailscale ip -4` sur la machine Frigate.
-    # Ne laissez jamais le 1.2.3.4 de la documentation : un candidat
+    # Le navigateur doit joindre AU MOINS un de ces candidats. Ne laissez jamais
+    # le 1.2.3.4 de la documentation ni un placeholder : un candidat
     # inatteignable donne une connexion qui s'établit sans jamais d'image.
     candidates:
       - 192.168.1.38:8555
       - 100.X.Y.Z:8555
 
+# ---------------------------------------------------------------------------
+# Enregistrement / captures
+# ---------------------------------------------------------------------------
 record:
+  # Désactivé globalement : l'activer depuis l'UI ou MQTT n'aura aucun effet
+  # tant que cette clé est à false.
   enabled: false
+  expire_interval: 60
+  sync_recordings: true
+  export:
+    timelapse_args: -vf setpts=0.04*PTS -r 30
+  preview:
+    quality: medium
+  alerts:
+    pre_capture: 5
+    post_capture: 5
+    retain:
+      days: 14
+      mode: motion
+  detections:
+    pre_capture: 5
+    post_capture: 5
+    retain:
+      days: 14
+      mode: motion
 
 snapshots:
   enabled: true
+  clean_copy: true
+  timestamp: true
+  bounding_box: true
+  crop: false
+  height: 175
+  required_zones: []
+  retain:
+    default: 10
+    objects:
+      person: 15
+  quality: 70
 
+semantic_search:
+  enabled: true
+  # Laissé à true, l'historique est réindexé À CHAQUE redémarrage de Frigate.
+  reindex: false
+  model_size: small
+
+detect:
+  enabled: true
+
+face_recognition:
+  enabled: true
+  model_size: small
+
+lpr:
+  enabled: true
+
+classification:
+  bird:
+    enabled: true
+
+notifications:
+  enabled: true
+  email: VOTRE_ADRESSE@example.com
+
+# ---------------------------------------------------------------------------
+# Caméras
+# ---------------------------------------------------------------------------
 cameras:
   frigate1:
     ffmpeg:
@@ -91,45 +166,70 @@ cameras:
           roles:
             - detect
     detect:
+      enabled: true
       width: 1024
       height: 600
-      fps: 5
+      fps: 30
     objects:
       track:
         - person
+        - cat
+      filters:
+        person:
+          min_score: 0.7
+          threshold: 0.8
+    motion:
+      threshold: 30
+      contour_area: 83
+      improve_contrast: false
+    notifications:
+      enabled: true
 
   doorbell:
     ffmpeg:
       inputs:
         # Le restream de go2rtc, jamais le P4 directement : celui-ci n'a ainsi
         # qu'un seul client RTSP à servir quel que soit le nombre de vues.
+        # (En variante H.264 : rtsp://127.0.0.1:8554/doorbell)
         - path: rtsp://127.0.0.1:8554/doorbell_webrtc
           input_args: preset-rtsp-restream
           roles:
             - detect
     detect:
-      # Résolution du capteur, telle que réglée dans le YAML ESPHome.
+      enabled: true
+      # Résolution du capteur OV5647, telle que réglée dans le YAML ESPHome.
       width: 800
       height: 640
+      # 5 fps suffit pour une sonnette et épargne le Coral. Le flux plafonne de
+      # toute façon vers 16 fps, imposé par l'overhead LVGL de l'aperçu local.
       fps: 5
+    live:
+      # Syntaxe 0.15+ : « nom affiché » -> flux go2rtc.
+      # (En variante H.264 : Sonnette: doorbell)
+      streams:
+        Sonnette: doorbell_webrtc
     objects:
       track:
         - person
-    live:
-      # Syntaxe 0.15+ : « nom affiché » -> flux go2rtc.
-      # (`stream_name:` était la forme 0.14, elle n'existe plus.)
-      streams:
-        Sonnette: doorbell_webrtc
+      filters:
+        person:
+          min_score: 0.7
+          threshold: 0.8
+    motion:
+      threshold: 30
+      contour_area: 83
+      improve_contrast: false
+    notifications:
+      enabled: true
 
 # ---------------------------------------------------------------------------
-# Conversation bidirectionnelle
+# Ports à publier dans la configuration réseau de l'add-on
 #
-# Frigate la désactive hors contexte sécurisé. Le port 5000 est du HTTP direct
-# et ne la permet donc JAMAIS, quelle que soit la configuration ci-dessus :
-# ouvrez https://<frigate>:8971 et acceptez le certificat auto-signé.
-#
-# Publiez ces ports dans la configuration réseau de l'add-on :
-#   8971/tcp   interface HTTPS authentifiée
-#   8555/tcp   WebRTC
-#   8555/udp   WebRTC
+#   8555/tcp + 8555/udp   WebRTC — sans eux, aucune image dans la carte
+#   8971/tcp              interface HTTPS de Frigate. Le port 5000 est du HTTP
+#                         direct : Frigate y désactive la conversation
+#                         bidirectionnelle, contexte non sécurisé.
+#   1984/tcp              uniquement si vous utilisez la carte WebRTC Camera
+#                         d'AlexxIT, qui doit interroger ce go2rtc pour trouver
+#                         les flux — sinon elle en démarre un troisième.
 # ---------------------------------------------------------------------------
