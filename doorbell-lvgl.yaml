@@ -549,9 +549,12 @@ lvgl:
                   text_font: f_18
             on_click:
               - switch.toggle: audio_amplifier
+              # Retour visuel immédiat ; le bloc `interval:` en bas de fichier
+              # rattrape en plus les basculements venus de Home Assistant.
               - lvgl.label.update:
                   id: amp_label
-                  text: !lambda 'return id(audio_amplifier).state ? "Ampli ON" : "Ampli OFF";'
+                  text: !lambda |-
+                    return id(audio_amplifier).state ? std::string("Ampli ON") : std::string("Ampli OFF");
 
 interval:
   - interval: 5s
@@ -564,3 +567,11 @@ interval:
           text: !lambda |-
             const uint8_t n = id(doorbell_stream).client_count();
             return std::to_string(n) + (n > 1 ? " clients" : " client");
+      # Rattrape un basculement fait depuis Home Assistant. L'appui sur le
+      # bouton, lui, met l'étiquette à jour immédiatement.
+      # `std::string(...)` est obligatoire : un ternaire entre deux littéraux
+      # produit un `const char*`, sur lequel LVGL appelle ensuite `.c_str()`.
+      - lvgl.label.update:
+          id: amp_label
+          text: !lambda |-
+            return id(audio_amplifier).state ? std::string("Ampli ON") : std::string("Ampli OFF");

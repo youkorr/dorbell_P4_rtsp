@@ -51,6 +51,19 @@ else
   echo "  OK   no example lambda calls a removed ESPHome helper"
 fi
 
+# A ternary between two string literals is a 'const char*', not a std::string.
+# Text-taking actions (lvgl.label.update, text_sensor...) then call .c_str() on
+# it and the build dies with "request for member 'c_str' in ... non-class type".
+# Concatenation or an explicit std::string()/std::to_string() fixes the type.
+if grep -nE 'return[^;]*\?[^;]*"[^"]*"[^;]*:[^;]*"[^"]*"' ./*.yaml 2>/dev/null \
+     | grep -v 'std::string\|std::to_string'; then
+  echo "  FAILED: a lambda returns a bare 'const char*' ternary where a"
+  echo "          std::string is expected. Wrap the branches in std::string()."
+  fail=1
+else
+  echo "  OK   no lambda returns a const char* ternary"
+fi
+
 echo
 echo "== YAML pins =="
 # A GPIO claimed twice in one config is accepted by every check above and only
