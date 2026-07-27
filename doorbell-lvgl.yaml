@@ -318,9 +318,18 @@ script:
   - id: ring
     mode: restart
     then:
+      # Trace de diagnostic : si cette ligne n'apparaît pas dans `esphome logs`
+      # quand vous appuyez, c'est l'appui tactile qui n'atteint pas le bouton
+      # (calibration/rotation du GT911), pas la sonnerie qui échoue.
+      - logger.log:
+          format: "ring: sequence declenchee"
+          level: INFO
       - binary_sensor.template.publish:
           id: doorbell_button
           state: true
+      - logger.log:
+          format: "ring: binary_sensor 'Bouton' publie a ON"
+          level: INFO
       - lvgl.label.update:
           id: stream_status
           text: "● Sonnerie !"
