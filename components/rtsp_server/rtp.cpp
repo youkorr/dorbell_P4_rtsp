@@ -201,10 +201,30 @@ JpegInfo parse_jpeg(const uint8_t *data, size_t len) {
         const size_t scan_start = pos + 2 + seg_len;
         if (scan_start >= len)
           return info;
+        // RFC 2435 carries the entropy-coded scan alone, so everything from the
+        // EOI marker onwards has to go. Trimming only the last two bytes is not
+        // enough: the ESP32-P4 hardware JPEG encoder reports a length rounded up
+        // to its DMA burst, so alignment bytes usually sit AFTER the EOI. Those
+        // bytes then travel as scan data and the receiver decodes the embedded
+        // FF D9 as a premature end of image — which strict decoders report as
+        // "error dc" partway through the picture while lenient ones (VLC, most
+        // browsers) just show a torn frame.
+        //
+        // Scan forward for the FIRST EOI rather than backwards from the end: a
+        // padding byte pair could look like an EOI too. Inside entropy-coded
+        // data an 0xFF byte is always followed by 0x00 (byte stuffing) or by a
+        // restart marker 0xD0..0xD7, so FF D9 cannot occur before the real EOI.
         size_t scan_end = len;
-        // Trim the EOI marker; RFC 2435 carries only the scan itself.
-        if (scan_end >= 2 && data[scan_end - 2] == 0xFF && data[scan_end - 1] == 0xD9)
-          scan_end -= 2;
+        for (const uint8_t *p = data + scan_start; p + 1 < data + len;) {
+          const auto *ff = static_cast<const uint8_t *>(std::memchr(p, 0xFF, static_cast<size_t>(data + len - 1 - p)));
+          if (ff == nullptr)
+            break;
+          if (ff[1] == 0xD9) {
+            scan_end = static_cast<size_t>(ff - data);
+            break;
+          }
+          p = ff + 1;
+        }
         if (scan_end <= scan_start)
           return info;
 

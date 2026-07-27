@@ -90,6 +90,49 @@ int main(int argc, char **argv) {
   assert(c.pkts.empty());
   printf("f444.jpg   correctly rejected (4:4:4 has no RFC 2435 type)\n");
 
+  // Regression: the ESP32-P4 hardware JPEG encoder reports a length rounded up
+  // to its DMA burst, so alignment bytes sit AFTER the EOI marker. Trimming
+  // only the final two bytes left the EOI and its padding in the scan, and the
+  // receiver decoded that embedded FF D9 as a premature end of image -- ffmpeg
+  // reports "error dc" partway through the picture, VLC just shows a torn frame.
+  {
+    auto clean = load(path("f420.jpg").c_str());
+    const JpegInfo ref = parse_jpeg(clean.data(), clean.size());
+    assert(ref.valid && ref.scan_len > 0);
+
+    for (int pad : {1, 7, 16, 63, 512}) {
+      auto padded = clean;
+      padded.insert(padded.end(), static_cast<size_t>(pad), 0x00);
+      const JpegInfo got = parse_jpeg(padded.data(), padded.size());
+      assert(got.valid);
+      assert(got.scan_len == ref.scan_len);
+      assert(memcmp(got.scan, ref.scan, ref.scan_len) == 0);
+    }
+
+    // Padding that itself contains an FF D9 must not move the cut either: the
+    // scan has to stop at the FIRST EOI, not the last one in the buffer.
+    auto evil = clean;
+    const uint8_t tail[] = {0x00, 0xFF, 0xD9, 0x00, 0x00};
+    evil.insert(evil.end(), tail, tail + sizeof(tail));
+    const JpegInfo got = parse_jpeg(evil.data(), evil.size());
+    assert(got.valid && got.scan_len == ref.scan_len);
+    assert(memcmp(got.scan, ref.scan, ref.scan_len) == 0);
+
+    // And the packets carrying that padded frame must be byte-identical to the
+    // ones carrying the clean frame.
+    Collector a, b;
+    MjpegPacketizer pa(1400, 26, 7), pb(1400, 26, 7);
+    assert(pa.packetize(clean.data(), clean.size(), 12345, &a));
+    auto padded = clean;
+    padded.insert(padded.end(), 32, 0x00);
+    assert(pb.packetize(padded.data(), padded.size(), 12345, &b));
+    assert(a.pkts.size() == b.pkts.size());
+    for (size_t i = 0; i < a.pkts.size(); i++)
+      assert(a.pkts[i] == b.pkts[i]);
+
+    printf("padded encoder output trimmed at the first EOI (%zu pkts, scan %zu B)\n", a.pkts.size(), ref.scan_len);
+  }
+
   // Garbage must not crash or emit.
   std::vector<uint8_t> junk(500, 0xAB);
   assert(!parse_jpeg(junk.data(), junk.size()).valid);
