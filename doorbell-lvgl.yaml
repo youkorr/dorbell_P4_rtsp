@@ -293,34 +293,44 @@ rtsp_server:
 ##  Bouton de sonnette, carillon, écran
 ## ===========================================================================
 
+# Ce banc de test n'a AUCUN bouton câblé : l'appui vient du bouton tactile
+# « Sonner » de la page LVGL. Le capteur reste néanmoins exposé à Home
+# Assistant, pour que les automatisations (notification, enregistrement...)
+# soient les mêmes que sur une sonnette avec bouton physique.
+#
+# Pour une carte avec un vrai bouton, remplacez ce bloc par :
+#   - platform: gpio
+#     id: doorbell_button
+#     name: "Bouton"
+#     pin: {number: GPIOxx, mode: {input: true, pullup: true}, inverted: true}
+#     filters: [{delayed_on: 30ms}, {delayed_off: 100ms}]
+#     on_press: [{script.execute: ring}]
+# en choisissant une broche libre — le lint refuse un GPIO déjà utilisé.
 binary_sensor:
-  - platform: gpio
+  - platform: template
     id: doorbell_button
     name: "Bouton"
-    pin:
-      number: GPIO32
-      mode:
-        input: true
-        pullup: true
-      inverted: true
-    filters:
-      - delayed_on: 30ms
-      - delayed_off: 100ms
-    on_press:
-      - script.execute: ring
 
-# Le carillon et l'appui sur le bouton partagent la même séquence, qu'elle
-# vienne du bouton physique ou du bouton tactile de l'écran.
+# Séquence unique de sonnerie, quelle que soit son origine. Le script pulse le
+# capteur pour que Home Assistant voie un appui franc, exactement comme un
+# bouton câblé.
 script:
   - id: ring
     mode: restart
     then:
+      - binary_sensor.template.publish:
+          id: doorbell_button
+          state: true
       - lvgl.label.update:
           id: stream_status
           text: "● Sonnerie !"
           text_color: ${col_amber}
       - light.turn_on: backlight
-      - delay: 3s
+      - delay: 1s
+      - binary_sensor.template.publish:
+          id: doorbell_button
+          state: false
+      - delay: 2s
       - lvgl.label.update:
           id: stream_status
           text: "● En attente"
