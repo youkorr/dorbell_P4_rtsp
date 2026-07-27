@@ -141,6 +141,24 @@ for f in "$SRC"/*.cpp; do
 done
 
 echo
+echo "== actions instantiate =="
+# Compiling automation.h alone proves nothing: the actions are templates, so an
+# `override` that does not match, or a pure virtual left unimplemented, is only
+# diagnosed on a concrete instantiation. tests/test_automation.cpp creates them
+# the way the generated main.cpp does.
+if [ -z "$V4L2" ]; then
+  echo "  SKIPPED (needs esp_video for linux/videodev2.h)"
+else
+  printf '  %-22s ' "test_automation.cpp"
+  if out=$(g++ -std=gnu++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter \
+        -Wno-missing-field-initializers -I"$STUB" $V4L2 -I"$SRC" tests/test_automation.cpp 2>&1); then
+    echo "OK"
+  else
+    echo "FAILED"; echo "$out" | head -20; fail=1
+  fi
+fi
+
+echo
 echo "== headers stand alone =="
 for h in "$SRC"/*.h; do
   name=$(basename "$h")
