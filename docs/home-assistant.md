@@ -338,11 +338,19 @@ la configuration.
 |---|---|
 | 1 | La caméra a une sortie audio |
 | 2 | go2rtc sait faire l'audio bidirectionnel avec elle |
-| 3 | Home Assistant est accessible en **HTTPS** |
+| 3 | Home Assistant est accessible en **HTTPS** — voir l'encadré |
 | 4 | **Caméra de type Frigate uniquement** — pas une Generic Camera |
 | 5 | **`live_provider: go2rtc` uniquement** — jamais `ha` |
 | 6 | **`modes: [webrtc]` uniquement** |
 | 7 | Le bouton micro est activé dans `menu.buttons` |
+
+> **La 3 se règle sans certificat à gérer.** Un accès distant Tailscale
+> (`https://…​.ts.net`) ou Nabu Casa (`https://…​.ui.nabu.casa`) est du HTTPS
+> valide : le contexte est sécurisé, et le micro devient accessible. Le piège est
+> alors ailleurs — il faut **ouvrir Home Assistant par cette adresse-là**. La même
+> interface atteinte par `http://192.168.1.x:8123`, sur le même réseau et le même
+> écran, n'aura pas le micro. Ce n'est pas l'installation qui décide, c'est
+> l'URL de la barre d'adresse.
 
 La 6 a une conséquence qu'on découvre tard : **le mode `mjpeg` exclut le
 push-to-talk par construction**. Se rabattre sur MJPEG parce que le WebRTC
@@ -723,6 +731,94 @@ views:
               enabled: true
               type: momentary
 ```
+
+## 6 bis. « Ça ne m'ouvre pas la page de la sonnette »
+
+Attente naturelle, et pourtant : **Home Assistant ne sait pas forcer un
+navigateur à changer de page.** Il n'existe aucun service natif pour ça. Une
+automatisation agit sur des appareils (enceintes, lumières, téléphones) ; elle
+n'a pas la main sur l'onglet ouvert devant vous.
+
+Ce que fait réellement le `uri:` d'une notification : il arme l'action de la
+notification. La page s'ouvre **quand on tape dessus**, pas à la seconde où ça
+sonne. C'est voulu — un téléphone qui change d'écran tout seul serait insupportable.
+
+### Vérifier d'abord que la vue existe
+
+Avant de chercher plus loin : `/lovelace/sonnette` n'existe que si un tableau de
+bord contient une vue dont le **chemin d'URL** est exactement `sonnette`. Il se
+règle dans **le tableau de bord → ✏️ → l'onglet de la vue → ⚙️ → « URL »**. Ce
+n'est pas le titre de la vue : une vue titrée « Sonnette » peut très bien avoir
+le chemin `view_2`. Tapez l'adresse à la main dans un navigateur : si vous
+tombez sur une page vide ou sur le tableau de bord par défaut, le chemin est
+faux, et aucune notification n'y mènera.
+
+Sur un tableau de bord qui n'est pas celui par défaut, le chemin complet inclut
+son nom : `/sonnette-dashboard/sonnette`. Le plus sûr est de naviguer jusqu'à la
+vue et de recopier ce qui se trouve dans la barre d'adresse.
+
+### Les trois façons d'arriver sur cette page
+
+| | Comment | Automatique ? |
+|---|---|---|
+| Notification avec action `URI` | on tape sur la notification | non — un geste |
+| La carte déjà à l'écran, avec `triggers:` (§5) | elle bascule sur le direct toute seule | oui, mais seulement si la page est déjà ouverte |
+| **Browser Mod** | ouvre une fenêtre, ou navigue, sur un navigateur désigné | **oui, vraiment** |
+
+### Browser Mod : la seule vraie réponse
+
+[Browser Mod](https://github.com/thomasloven/hass-browser_mod) (via HACS) donne à
+Home Assistant la main sur un navigateur précis. C'est ce qu'il faut pour une
+tablette murale ou un PC de bureau qui doit afficher le visiteur sans qu'on
+touche à rien.
+
+Chaque navigateur enregistré reçoit un `browser_id`, lisible dans
+**Paramètres → Browser Mod**.
+
+```yaml
+alias: Sonnette - afficher la camera
+mode: single
+triggers:
+  - trigger: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
+actions:
+  # Une fenetre par-dessus la vue courante : rien a fermer a la main, elle
+  # disparait toute seule au bout de 60 s.
+  - action: browser_mod.popup
+    data:
+      title: Quelqu'un sonne
+      size: wide
+      timeout: 60000
+      dismissable: true
+      browser_id:
+        - tablette-entree
+      content:
+        type: custom:advanced-camera-card
+        cameras:
+          - camera_entity: camera.doorbell
+            live_provider: go2rtc
+            go2rtc:
+              stream: doorbell_webrtc
+              modes: [webrtc]
+        live:
+          preload: true
+          auto_unmute: [selected, visible]
+        menu:
+          buttons:
+            microphone:
+              enabled: true
+              type: momentary
+
+  # Variante : changer carrement de page au lieu d'ouvrir une fenetre.
+  # - action: browser_mod.navigate
+  #   data:
+  #     path: /lovelace/sonnette
+  #     browser_id:
+  #       - tablette-entree
+```
+
+La fenêtre est préférable à la navigation : elle n'abandonne pas ce que vous
+étiez en train de faire, et elle se referme seule.
 
 ## 7. Vérifier que l'audio bidirectionnel est bien négocié
 
