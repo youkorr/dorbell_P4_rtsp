@@ -1,55 +1,56 @@
-# NOTE : ce fichier est un EXEMPLE à copier dans /config/esphome/.
-# `external_components` ne récupère que `components/`, pas ce YAML : après une
-# mise à jour du dépôt, recopiez ce fichier si vous voulez les corrections.
-# ESP32-P4 smart doorbell: MIPI-CSI camera + RTSP with two-way audio.
-#
-#   OV5647 --MIPI CSI--> ESP32-P4 --MJPEG/RTSP--> go2rtc --WebRTC--> Home Assistant
-#                              <----- G.711 backchannel (talk) -----
-#
-# Everything below the camera and the audio (button, chime relay, LED, OTA...)
-# is plain ESPHome, exactly as in the rest of the project.
 
 substitutions:
   name: doorbell-p4
-  friendly_name: Sonnette
+  friendly_name: Doorbell
 
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
-  min_version: 2025.5.0
+
 
 esp32:
-  variant: esp32p4
+  flash_size: 16MB
+  variant: ESP32P4
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  engineering_sample: true
   framework:
     type: esp-idf
-    # The MIPI-CSI stack, the hardware H.264 encoder and the new I2S driver all
-    # need a recent IDF.
-    version: 5.4.0
+    advanced:
+      enable_idf_experimental_features: true
     sdkconfig_options:
-      # H.264 frame buffers and the camera buffers live in PSRAM.
-      CONFIG_SPIRAM: y
-      CONFIG_SPIRAM_MODE_HEX: y
-      CONFIG_SPIRAM_SPEED_200M: y
-      CONFIG_SPIRAM_USE_MALLOC: y
-      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360: y
-      # The RTSP task pushes RTP straight into lwIP; give it room to breathe.
+      CONFIG_COMPILER_OPTIMIZATION_PERF: y
+      CONFIG_SPIRAM_XIP_FROM_PSRAM: y
+      CONFIG_GDMA_ISR_IRAM_SAFE: y
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_SPIRAM_SPEED_200M: "y"
+      CONFIG_SPIRAM_SPEED: "200"
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_LWIP_SO_RCVBUF: "y"
       CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
       CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
 
-# NOTE: `rtsp_server` et l'option `enable_h264` d'esp_video vivent pour l'instant
-# sur la branche de travail ci-dessous. Une fois la PR fusionnee, remplacez ces
-# deux `ref:` par `main`.
+
 external_components:
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
-      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [rtsp_server]
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
-      ref: claude/esp32-p4-doorbell-rtsp-kodm6j
-    components: [esp_video]
+      ref: claude/usb-uvc-consumer-integration-gnbflf
+    components: [esp_video, esp_cam_sensor]
 
 logger:
   level: INFO
@@ -77,10 +78,8 @@ captive_portal:
 # Camera
 # ---------------------------------------------------------------------------
 
-# SCCB/I2C bus the sensor is configured over. Shared with esp_video so there is
-# no second driver fighting for the bus.
 i2c:
-  - id: cam_i2c
+  - id: bsp_bus
     sda: GPIO7
     scl: GPIO8
     frequency: 100kHz
@@ -88,15 +87,21 @@ i2c:
 
 esp_video:
   id: video
-  i2c_id: cam_i2c
+  i2c_id: bsp_bus
   xclk_pin: GPIO36 # -1 if your board has its own 24 MHz oscillator
   xclk_freq: 24000000
   enable_isp: true # RAW -> RGB565 conversion, feeds the JPEG encoder
-  # MJPEG uses the ESP-IDF hardware JPEG driver directly, so neither
-  # enable_jpeg (/dev/video10) nor enable_h264 (/dev/video11) is required.
-  # Set enable_h264: true only if you switch rtsp_server to `codec: h264`.
   enable_h264: false
-
+  
+esp_cam_sensor:
+  id: p4_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647
+  resolution: "800x640" #"1280x960"    #"800x640" 
+  framerate: 30
+  mirror_x: false
+  mirror_y: false
+  rotation: 0
 # ---------------------------------------------------------------------------
 # RTSP server (video + two-way audio)
 # ---------------------------------------------------------------------------
@@ -115,43 +120,49 @@ rtsp_server:
     codec: mjpeg # hardware JPEG encoder; H.264 is an option, see below
     framerate: 15
     jpeg_quality: 25 # 1..100; ~25 keeps a frame around 40-60 kB
-    # --- Option H.264 (test) -------------------------------------------------
-    # Halves the bandwidth and lets go2rtc hand the stream to WebRTC without
-    # transcoding. Needs `enable_h264: true` on esp_video above, and a sensor
-    # resolution whose width AND height are multiples of 16.
-    # codec: h264
-    # bitrate: 1500000   # the hardware encoder caps at 2.5 Mbps
-    # gop: 15            # one key frame per second -> clients start fast
-    # min_qp: 25
-    # max_qp: 40
+    max_clients: 4
+    drive_camera: false
+
 
   audio:
-    codec: pcmu # G.711 µ-law: no transcoding anywhere in the chain
-    sample_rate: 16000 # I2S clock; the wire is always 8 kHz
-
-    microphone: # INMP441 / ICS-43434
-      mode: std
-      i2s_port: 0
-      bclk_pin: GPIO20
-      lrclk_pin: GPIO21
-      din_pin: GPIO22
-      bits_per_sample: 32
-      channel: left # L/R pin tied to GND
-      gain: 6.0
-
-    speaker: # MAX98357A
-      i2s_port: 1
-      bclk_pin: GPIO23
-      lrclk_pin: GPIO26
-      dout_pin: GPIO27
-      bits_per_sample: 16
-      channel: left
-      volume: 0.8
-
-    # There is no acoustic echo canceller: mute the microphone while the far
-    # end is talking so the speaker cannot loop back into it.
+    codec: pcmu
+    sample_rate: 16000
+    microphone_id: board_microphone
+    speaker_id: board_speaker
+    gain: 6.0
+    volume: 0.8
     half_duplex: true
     talk_timeout: 300ms
+
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 30
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: false      
+  mic_digital_gain: 1.0     # 
+  mic_agc: 0          # 
+  echo_suppression: 0
+  noise_gate: 0         #
+
+microphone:
+  - platform: fdaudio
+    id: board_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: board_speaker
+    fdaudio_id: audio_engine
 
   on_talk_start:
     - switch.turn_on: amp_enable
