@@ -40,6 +40,9 @@ static constexpr float SILENCE_DBFS = -100.0f;
 /// Window of the long-hold meters: long enough that a status line printed every
 /// ten seconds still catches a spoken word.
 static constexpr int64_t PEAK_HOLD_LONG_US = 60000000;
+/// The loopback monitor stops itself after this long. Ample for the test it
+/// exists for, and short enough that forgetting it on is harmless.
+static constexpr int64_t LOOPBACK_TIMEOUT_US = 120000000;
 
 /// Saturate to the 16-bit PCM range.
 ///
@@ -509,6 +512,24 @@ static float hold_to_db(uint32_t hold) {
 float AudioPipeline::mic_peak_hold_db() const { return hold_to_db(this->mic_hold_); }
 
 float AudioPipeline::speaker_peak_hold_db() const { return hold_to_db(this->speaker_hold_); }
+
+void AudioPipeline::set_loopback(bool enabled) {
+  this->loopback_since_us_ = enabled ? esp_timer_get_time() : 0;
+  this->loopback_ = enabled;
+  this->loopback_yield_logged_ = false;
+  if (enabled) {
+    ESP_LOGI(TAG,
+             "loopback monitor on for %d s: speak, you should hear yourself. Expect howling if the speaker is "
+             "loud -- microphone and speaker share a board.",
+             static_cast<int>(LOOPBACK_TIMEOUT_US / 1000000));
+  }
+}
+
+bool AudioPipeline::loopback() const {
+  if (!this->loopback_)
+    return false;
+  return (esp_timer_get_time() - this->loopback_since_us_) < LOOPBACK_TIMEOUT_US;
+}
 
 bool AudioPipeline::speaker_healthy() const {
   if (!this->has_speaker())

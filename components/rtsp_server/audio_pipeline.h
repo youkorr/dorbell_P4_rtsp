@@ -163,10 +163,18 @@ class AudioPipeline {
 
   /// Local monitoring: send the microphone straight to the speaker. Speak, hear
   /// yourself, and both halves of the audio path are proven at once -- without
-  /// the network, go2rtc or a browser. Expect feedback if the two are close:
-  /// this is a bench test, not a mode to leave on.
-  void set_loopback(bool enabled) { this->loopback_ = enabled; }
-  bool loopback() const { return this->loopback_; }
+  /// the network, go2rtc or a browser.
+  ///
+  /// It TIMES OUT on purpose, and that is not a limitation. Microphone and
+  /// speaker sit on the same board: with any useful gain the loop is acoustic,
+  /// it runs away to full scale, and what you get is a howl rather than your
+  /// voice. Left on, it also holds the speaker against the real backchannel.
+  /// There is no legitimate reason to leave it running, and every reason not to
+  /// -- so it stops on its own.
+  void set_loopback(bool enabled);
+  /// False once the monitor has timed out, so a switch bound to this reads back
+  /// the truth rather than what it was last set to.
+  bool loopback() const;
 
   /// Queue a beep on the speaker, to prove the output path by itself.
   void play_test_tone(uint32_t frequency, uint32_t duration_ms);
@@ -254,6 +262,7 @@ class AudioPipeline {
   bool loopback_yield_logged_{false};
 
   volatile bool loopback_{false};
+  volatile int64_t loopback_since_us_{0};
   /// Remaining samples of the pending beep, and its phase state.
   volatile uint32_t tone_remaining_{0};
   uint32_t tone_frequency_{1000};

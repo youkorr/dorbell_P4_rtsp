@@ -408,6 +408,17 @@ void RTSPServer::log_status_() {
                "         the loudest sound of the last minute was %.1f dBFS -- far too quiet. Speech should "
                "reach -30..-6 dBFS. Raise the gain (the codec's own first, then 'gain:' here).",
                static_cast<double>(hold));
+    } else if (hold > -1.0f) {
+      // Pinned at full scale is not "loud and clear", it is a square wave. The
+      // usual cause is not the gain at all but the loopback monitor closing an
+      // acoustic loop -- which is why that is named first.
+      ESP_LOGW(TAG,
+               "         the microphone is CLIPPING (%.1f dBFS). %s",
+               static_cast<double>(hold),
+               this->audio_.loopback()
+                   ? "The loopback monitor is on and the microphone is hearing the speaker: that is acoustic "
+                     "feedback, not a level problem. Turn the monitor off."
+                   : "Lower 'gain:', or the codec's own gain.");
     }
     if (this->audio_.has_speaker()) {
       ESP_LOGI(TAG, "  spk:   now %.1f dBFS %s  max/60s %.1f dBFS%s",

@@ -954,4 +954,17 @@ interval:
       - lvgl.label.update:
           id: amp_label
           text: !lambda |-
-            return id(audio_amplifier).state ? std::string("Ampli ON") : std::string("Ampli OFF");   
+            return id(audio_amplifier).state ? std::string("Ampli ON") : std::string("Ampli OFF");
+      # La boucle locale s'éteint toute seule au bout de deux minutes. Sans cette
+      # resynchronisation, l'interrupteur resterait affiché « ON » alors que le
+      # composant l'a déjà coupée — et on chercherait un effet Larsen qui n'existe
+      # plus.
+      - if:
+          condition:
+            lambda: 'return id(audio_loopback_switch).state && !id(doorbell_stream).audio_loopback();'
+          then:
+            - switch.turn_off: audio_loopback_switch
+            - lvgl.label.update:
+                id: audio_test_label
+                text: "Test\nmicro"
+
