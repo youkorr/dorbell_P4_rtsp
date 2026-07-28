@@ -376,6 +376,17 @@ void RTSPServer::log_status_() {
     if (this->audio_.has_speaker()) {
       ESP_LOGI(TAG, "  spk:   peak %.1f dBFS %s%s", static_cast<double>(this->audio_.speaker_level_db()),
                this->audio_.speaker_level_bar(), this->audio_.loopback() ? "  <-- LOOPBACK TEST ON" : "");
+      // The line that answers "I press the test beep and hear nothing". The
+      // speaker reports how much it took; offered without written means the
+      // sink refuses the data and no volume setting will ever produce a sound.
+      ESP_LOGI(TAG, "         %" PRIu32 " bytes offered, %" PRIu32 " accepted, %" PRIu32 " short writes%s",
+               this->audio_.speaker_bytes_offered(), this->audio_.speaker_bytes_written(),
+               this->audio_.speaker_drops(),
+               (this->audio_.speaker_bytes_offered() > 0 && this->audio_.speaker_bytes_written() == 0)
+                   ? "   <-- THE SPEAKER IS REFUSING EVERYTHING"
+                   : "");
+    } else {
+      ESP_LOGI(TAG, "  spk:   no speaker configured -- backchannel disabled, nothing can come out");
     }
   } else {
     ESP_LOGI(TAG, "  audio: pipeline not running (no 'audio:' block configured?)");

@@ -165,16 +165,57 @@ size_t AudioPipeline::read_pcm_(int16_t *dst, size_t samples) {
   return got;
 }
 
+void AudioPipeline::account_write_(const int16_t *src, size_t offered_bytes, size_t written_bytes,
+                                   size_t bytes_per_sample) {
+  this->speaker_bytes_offered_ += static_cast<uint32_t>(offered_bytes);
+  this->speaker_bytes_written_ += static_cast<uint32_t>(written_bytes);
+
+  if (written_bytes < offered_bytes) {
+    this->speaker_drops_++;
+    if ((this->speaker_drops_ % 50) == 1) {
+      ESP_LOGW(TAG,
+               "the speaker accepted %u of %u bytes. It is not keeping up, or it is not running: "
+               "%" PRIu32 " short writes so far.",
+               static_cast<unsigned>(written_bytes), static_cast<unsigned>(offered_bytes),
+               this->speaker_drops_);
+    }
+  }
+
+  // The meter reflects what the speaker ACCEPTED, never what we offered it.
+  // Metering the offer was actively misleading: with a sink that refuses
+  // everything, the bar sat at a healthy level while nothing came out -- the
+  // one reading that had to be trustworthy said the opposite of the truth.
+  if (written_bytes == 0)
+    return;
+  const size_t accepted_samples = written_bytes / (bytes_per_sample == 0 ? 1 : bytes_per_sample);
+  update_peak_(&this->speaker_peak_, &this->speaker_peak_us_, src, accepted_samples);
+}
+
 void AudioPipeline::write_pcm_(const int16_t *src, size_t samples) {
   if (samples == 0)
     return;
 
-  update_peak_(&this->speaker_peak_, &this->speaker_peak_us_, src, samples);
-
   if (this->external_speaker_ != nullptr) {
-    this->external_speaker_->play(reinterpret_cast<const uint8_t *>(src), samples * sizeof(int16_t));
+    // An ESPHome speaker may stop itself when it has been idle, and a stopped
+    // speaker silently returns 0 from every play(). Restart it rather than
+    // spend the rest of the session writing into nothing.
+    if (!this->external_speaker_->is_running()) {
+      this->external_speaker_->start();
+      if (!this->speaker_restart_logged_) {
+        ESP_LOGW(TAG, "the speaker component had stopped; restarting it");
+        this->speaker_restart_logged_ = true;
+      }
+    }
+
+    const size_t offered = samples * sizeof(int16_t);
+    // Wait briefly rather than drop on a momentarily full ring buffer: 20 ms is
+    // one packet, so this bounds the latency to what we would have added anyway.
+    const size_t written =
+        this->external_speaker_->play(reinterpret_cast<const uint8_t *>(src), offered, pdMS_TO_TICKS(20));
+    this->account_write_(src, offered, written, sizeof(int16_t));
     return;
   }
+
   if (this->tx_handle_ == nullptr)
     return;
 
@@ -182,6 +223,7 @@ void AudioPipeline::write_pcm_(const int16_t *src, size_t samples) {
   if (bytes_per_sample == 2) {
     size_t written = 0;
     i2s_channel_write(this->tx_handle_, src, samples * sizeof(int16_t), &written, pdMS_TO_TICKS(200));
+    this->account_write_(src, samples * sizeof(int16_t), written, sizeof(int16_t));
     return;
   }
 
@@ -190,6 +232,7 @@ void AudioPipeline::write_pcm_(const int16_t *src, size_t samples) {
     wide[i] = static_cast<int32_t>(src[i]) << 16;
   size_t written = 0;
   i2s_channel_write(this->tx_handle_, wide.data(), wide.size() * sizeof(int32_t), &written, pdMS_TO_TICKS(200));
+  this->account_write_(src, wide.size() * sizeof(int32_t), written, sizeof(int32_t));
 }
 
 void AudioPipeline::stop() {
@@ -433,6 +476,16 @@ const char *AudioPipeline::mic_level_bar() const {
 const char *AudioPipeline::speaker_level_bar() const {
   render_bar_(this->speaker_bar_, this->speaker_level());
   return this->speaker_bar_;
+}
+
+bool AudioPipeline::speaker_healthy() const {
+  if (!this->has_speaker())
+    return false;
+  // Nothing offered yet is not a fault: it just means nobody has spoken and no
+  // test tone has been played.
+  if (this->speaker_bytes_offered_ == 0)
+    return true;
+  return this->speaker_bytes_written_ == this->speaker_bytes_offered_;
 }
 
 bool AudioPipeline::mic_alive() const {

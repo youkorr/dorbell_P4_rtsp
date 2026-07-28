@@ -123,9 +123,22 @@ class AudioPipeline {
   /// The same reading in dBFS: -100.0 is digital silence, 0.0 is full scale.
   /// Speech at a sensible level sits between -30 and -6 dBFS.
   float mic_level_db() const;
-  /// Peak of what was last written to the speaker, 0.0 – 1.0.
+  /// Peak of what the speaker ACCEPTED, 0.0 – 1.0. A sink that refuses the data
+  /// reads as silence here, which is the whole point: the meter has to fall when
+  /// nothing comes out, not when nothing is offered.
   float speaker_level() const;
   float speaker_level_db() const;
+
+  /// Bytes handed to the speaker, and bytes it actually took. Equal means the
+  /// output path is healthy. `written` frozen at 0 while `offered` climbs means
+  /// the sink is refusing everything -- a stopped speaker component, or one that
+  /// never started -- and no amount of volume will produce a sound.
+  uint32_t speaker_bytes_offered() const { return this->speaker_bytes_offered_; }
+  uint32_t speaker_bytes_written() const { return this->speaker_bytes_written_; }
+  /// Number of short writes: the speaker took less than it was given.
+  uint32_t speaker_drops() const { return this->speaker_drops_; }
+  /// True when the speaker has taken everything it was recently offered.
+  bool speaker_healthy() const;
   /// A fixed-width text meter for the logs, e.g. "[####------]".
   const char *mic_level_bar() const;
   const char *speaker_level_bar() const;
@@ -171,6 +184,8 @@ class AudioPipeline {
   static float read_peak_(volatile uint32_t peak, volatile int64_t stamp);
   /// Fill `dst` (>= 13 bytes) with a "[####------]" meter for `level`.
   static void render_bar_(char *dst, float level);
+  /// Record one write to the sink: how much was offered, how much it took.
+  void account_write_(const int16_t *src, size_t offered_bytes, size_t written_bytes, size_t bytes_per_sample);
   /// Append one buffer's worth of test tone to the playback path, if pending.
   size_t take_test_tone_(int16_t *dst, size_t samples);
 
@@ -208,6 +223,11 @@ class AudioPipeline {
 
   volatile uint32_t mic_samples_{0};
   volatile int64_t mic_last_sample_us_{0};
+
+  volatile uint32_t speaker_bytes_offered_{0};
+  volatile uint32_t speaker_bytes_written_{0};
+  volatile uint32_t speaker_drops_{0};
+  bool speaker_restart_logged_{false};
 
   volatile bool loopback_{false};
   /// Remaining samples of the pending beep, and its phase state.

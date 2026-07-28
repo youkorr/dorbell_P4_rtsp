@@ -315,6 +315,15 @@ binary_sensor:
     entity_category: diagnostic
     lambda: 'return id(doorbell_stream).is_streaming();'
 
+  # ON = il y a un problème : le haut-parleur n'a pas pris tout ce qu'on lui a
+  # donné. C'est l'entité à regarder en premier quand rien ne sort du P4.
+  - platform: template
+    name: "Sortie audio en defaut"
+    id: speaker_problem_sensor
+    device_class: problem
+    entity_category: diagnostic
+    lambda: 'return !id(doorbell_stream).speaker_healthy();'
+
 script:
   - id: ring
     mode: restart
@@ -443,6 +452,28 @@ sensor:
     entity_category: diagnostic
     update_interval: 5s
     lambda: 'return id(doorbell_stream).audio_packets_sent();'
+
+  # Le couple qui tranche la panne « je n'entends rien sortir du P4 ».
+  # Si « proposes » monte et « acceptes » reste à 0, le haut-parleur refuse tout :
+  # composant arrêté, jamais démarré, ou format refusé. Aucun réglage de volume
+  # n'y changera quoi que ce soit.
+  - platform: template
+    name: "Octets audio proposes au HP"
+    id: spk_offered_sensor
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).speaker_bytes_offered();'
+
+  - platform: template
+    name: "Octets audio acceptes par le HP"
+    id: spk_written_sensor
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).speaker_bytes_written();'
 
 switch:
   - platform: gpio
@@ -704,15 +735,46 @@ lvgl:
             text_color: ${col_text2}
             text_font: f_18
 
+        # ---------- Vumètre haut-parleur ----------
+        # Le pendant du vumètre micro, pour le sens descendant. Il mesure ce que
+        # le haut-parleur a ACCEPTÉ, pas ce qu'on lui a proposé : un composant
+        # arrêté qui refuse tout laisse la barre à plat, ce qui est justement la
+        # panne « j'appuie sur Bip et je n'entends rien ».
+        - label:
+            x: 836
+            y: 302
+            text: "Haut-parleur"
+            text_color: ${col_text2}
+            text_font: f_18
+        - bar:
+            id: spk_bar
+            x: 836
+            y: 328
+            width: 176
+            height: 14
+            min_value: 0
+            max_value: 100
+            value: 0
+            bg_color: ${col_panel}
+            indicator:
+              bg_color: ${col_amber}
+        - label:
+            id: spk_db_label
+            x: 836
+            y: 348
+            text: "—"
+            text_color: ${col_text2}
+            text_font: f_18
+
         # ---------- Carillon ----------
         # Remplace le relais GPIO : sur cette carte GPIO33 est déjà le
         # `reset_pin` de l'écran, il n'y a donc pas de broche libre pour lui.
         - button:
             id: btn_ring
             x: 836
-            y: 320
+            y: 372
             width: 176
-            height: 60
+            height: 54
             bg_color: ${col_panel}
             bg_opa: COVER
             border_width: 1
@@ -734,9 +796,9 @@ lvgl:
         - button:
             id: btn_audio_test
             x: 836
-            y: 466
+            y: 492
             width: 84
-            height: 60
+            height: 54
             bg_color: ${col_panel}
             bg_opa: COVER
             border_width: 1
@@ -760,9 +822,9 @@ lvgl:
         - button:
             id: btn_beep
             x: 928
-            y: 466
+            y: 492
             width: 84
-            height: 60
+            height: 54
             bg_color: ${col_panel}
             bg_opa: COVER
             border_width: 1
@@ -787,9 +849,9 @@ lvgl:
         - button:
             id: btn_amp
             x: 836
-            y: 396
+            y: 432
             width: 176
-            height: 60
+            height: 54
             bg_color: ${col_panel}
             bg_opa: COVER
             border_width: 1
@@ -834,6 +896,29 @@ interval:
               return std::string("micro muet !");
             char buf[24];
             snprintf(buf, sizeof(buf), "%.0f dBFS", id(doorbell_stream).mic_level_db());
+            return std::string(buf);
+
+      # Le pendant côté sortie. Même échelle, même lecture.
+      - lvgl.bar.update:
+          id: spk_bar
+          value: !lambda |-
+            const float db = id(doorbell_stream).speaker_level_db();
+            int pct = static_cast<int>((db + 60.0f) * 100.0f / 60.0f);
+            return pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+      - lvgl.label.update:
+          id: spk_db_label
+          text: !lambda |-
+            if (!id(doorbell_stream).has_speaker())
+              return std::string("pas de HP");
+            // Le cas qui compte : on a poussé des octets, le haut-parleur n'en a
+            // pris aucun. Rien ne sortira, quel que soit le volume.
+            const uint32_t offered = id(doorbell_stream).speaker_bytes_offered();
+            if (offered > 0 && id(doorbell_stream).speaker_bytes_written() == 0)
+              return std::string("HP refuse tout !");
+            if (offered == 0)
+              return std::string("rien joue");
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%.0f dBFS", id(doorbell_stream).speaker_level_db());
             return std::string(buf);
 
   - interval: 5s

@@ -108,6 +108,13 @@ class RTSPServer : public Component, public RtpSender {
   /// Peak level of what is being pushed to the speaker, 0.0 – 1.0.
   float speaker_level() const { return this->audio_.speaker_level(); }
   float speaker_level_db() const { return this->audio_.speaker_level_db(); }
+  /// Bytes handed to the speaker versus bytes it accepted. `written` stuck at 0
+  /// while `offered` climbs is the signature of a sink that refuses everything.
+  uint32_t speaker_bytes_offered() const { return this->audio_.speaker_bytes_offered(); }
+  uint32_t speaker_bytes_written() const { return this->audio_.speaker_bytes_written(); }
+  uint32_t speaker_drops() const { return this->audio_.speaker_drops(); }
+  /// False when the speaker is refusing or truncating what it is given.
+  bool speaker_healthy() const { return this->audio_.speaker_healthy(); }
   /// PCM samples read from the microphone since boot. Frozen at 0 means the
   /// source delivers nothing at all -- a different fault from "delivers silence".
   uint32_t mic_samples() const { return this->audio_.mic_samples(); }
