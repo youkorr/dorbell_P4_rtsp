@@ -854,6 +854,166 @@ actions:
 La fenêtre est préférable à la navigation : elle n'abandonne pas ce que vous
 étiez en train de faire, et elle se referme seule.
 
+## 6 ter. Un modèle de sonnette éprouvé : l'état « ça sonne »
+
+Le montage [dahua-vto-on-home-assistant](https://github.com/felipecrs/dahua-vto-on-home-assistant)
+de Felipe Santos résout le même problème avec un interphone Dahua, et son
+automatisation vaut d'être copiée. Le point central qu'il apporte :
+
+> **une sonnette n'est pas un évènement, c'est un état.** « Quelqu'un attend à la
+> porte » dure jusqu'à ce qu'on réponde ou qu'on renonce.
+
+Notre `event` et notre `binary_sensor` de 5 s disent « on a appuyé ». Ils ne
+disent pas « quelqu'un attend toujours ». C'est cette différence qui permet de
+faire sonner *jusqu'à ce qu'on décroche* plutôt qu'une seule fois, et d'afficher
+un bouton « Répondre » qui a un sens.
+
+### L'aide-mémoire à créer
+
+**Paramètres → Appareils et services → Aides → Créer un aide → Bascule**, nommé
+`Sonnette en cours` (`input_boolean.doorbell_calling`). Un second, `Ne pas
+déranger` (`input_boolean.do_not_disturb`), rend le carillon silencieux sans
+toucher aux notifications.
+
+### L'automatisation, adaptée au P4
+
+```yaml
+alias: Sonnette - quelqu'un attend
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
+actions:
+  - action: input_boolean.turn_on
+    target:
+      entity_id: input_boolean.doorbell_calling
+
+  # Moins fort la nuit. Rien de plus penible qu'un carillon a plein volume a 23 h.
+  - action: media_player.volume_set
+    target:
+      entity_id:
+        - media_player.cuisine
+        - media_player.chambre
+    data:
+      volume_level: >-
+        {{ 0.6 if is_state('sun.sun', 'below_horizon') else 0.75 }}
+    continue_on_error: true
+
+  - parallel:
+      - action: notify.all_phones
+        continue_on_error: true
+        data:
+          title: Sonnette
+          message: Quelqu'un sonne a la porte
+          data:
+            # Taper la notification elle-meme ouvre la vue (Android).
+            clickAction: /lovelace/sonnette
+            # `tag` fait qu'un second appui REMPLACE la notification au lieu
+            # d'en empiler une deuxieme.
+            tag: doorbell-ringing
+            group: doorbell-ringing
+            channel: Doorbell
+            importance: high
+            priority: high
+            ttl: 0
+            persistent: true
+            timeout: 120
+            vibrationPattern: 1000, 100, 1000, 100, 1000, 100
+            image: /api/camera_proxy/camera.doorbell
+            actions:
+              - action: URI
+                title: Repondre
+                uri: /lovelace/sonnette
+              - action: IGNORE
+                title: Ignorer
+
+      # Une image fixe directement depuis go2rtc, pratique pour un televiseur.
+      - action: notify.all_tvs
+        continue_on_error: true
+        data:
+          title: Sonnette
+          message: Quelqu'un sonne a la porte
+          data:
+            image:
+              url: http://192.168.1.38:1984/api/frame.jpeg?src=doorbell
+            duration: 15
+            fontsize: max
+
+  # Le carillon, repete tant que personne n'a repondu -- six fois au plus.
+  - if:
+      - condition: state
+        entity_id: input_boolean.do_not_disturb
+        state: "off"
+    then:
+      - repeat:
+          while:
+            - condition: state
+              entity_id: input_boolean.doorbell_calling
+              state: "on"
+            - condition: template
+              value_template: "{{ repeat.index <= 6 }}"
+          sequence:
+            - action: media_player.play_media
+              continue_on_error: true
+              target:
+                entity_id: media_player.cuisine
+              data:
+                media_content_id: /local/sounds/doorbell.mp3
+                media_content_type: audio/mp3
+            - delay:
+                seconds: 5
+
+  - action: input_boolean.turn_off
+    target:
+      entity_id: input_boolean.doorbell_calling
+
+  # Anti-matraquage : un visiteur impatient ne relance pas six carillons.
+  - alias: Eviter le matraquage du bouton
+    delay:
+      seconds: 15
+```
+
+Trois détails qui font la différence entre une sonnette agréable et une sonnette
+insupportable, et qu'on ne trouve qu'en s'y étant brûlé :
+
+- **`continue_on_error: true` partout.** Un téléviseur éteint ne doit pas
+  empêcher le carillon de la cuisine de sonner.
+- **`tag:` sur la notification.** Sans lui, trois appuis donnent trois
+  notifications empilées ; avec, la dernière remplace la précédente.
+- **`mode: single` + `max_exceeded: silent` + le délai final.** Sans ça, un
+  visiteur qui appuie trois fois lance trois séquences qui se chevauchent.
+
+### Fully Kiosk, l'autre façon d'ouvrir la page
+
+Ce montage n'utilise pas Browser Mod mais **Fully Kiosk Browser**, si votre
+tablette murale tourne dessus :
+
+```yaml
+- action: fully_kiosk.load_url
+  target:
+    device_id: <l'identifiant de votre tablette>
+  data:
+    url: https://homeassistant.taild83edc.ts.net/lovelace/sonnette
+  continue_on_error: true
+```
+
+Plus simple que Browser Mod quand la tablette est déjà en kiosque. Browser Mod
+reste préférable pour un PC de bureau ou un navigateur ordinaire (§6 bis).
+
+### Ce que ce montage confirme sur le micro
+
+Sa documentation est catégorique, et rejoint mot pour mot le §4 ter :
+
+> *« It is mandatory that you access your Home Assistant through HTTPS for
+> microphone to work. This is a browser restriction for allowing websites to use
+> your microphone. »*
+
+Il montre aussi qu'avec go2rtc, l'audio bidirectionnel **fonctionne bel et bien**
+dans l'Advanced Camera Card — ce n'est donc pas une impasse en soi. Chez lui, la
+caméra fournit du H.264 : une seule source, un seul consommateur. C'est la
+contrainte du §4 ter, et elle vient de notre transcodage MJPEG, pas de la carte.
+
 ## 7. Vérifier que l'audio bidirectionnel est bien négocié
 
 1. Ouvrez l'interface de go2rtc : `http://192.168.1.10:1984`.
@@ -881,7 +1041,16 @@ chaîne. Dans l'ordre :
 
 1. **Bip de test** — bouton `Bip de test` dans Home Assistant, ou le bouton
    « Bip » sur l'écran du P4. Pas de bip ⇒ le problème est le haut-parleur, pas
-   le réseau : ampli coupé, `speaker_id` absent, volume à zéro.
+   le réseau. Et cette fois l'appareil dit *lequel* : regardez les deux compteurs
+   `Octets audio proposes au HP` et `Octets audio acceptes par le HP` juste
+   après l'appui.
+
+   | Les deux compteurs | Ce que ça veut dire |
+   |---|---|
+   | proposés = 0 | le bip n'a même pas été synthétisé : pas de `speaker_id`, ou le pipeline audio n'a pas démarré |
+   | proposés monte, **acceptés reste à 0** | le composant haut-parleur **refuse tout**. Il est arrêté, ou le format lui déplaît. Aucun réglage de volume n'y changera rien — l'écran affiche `HP refuse tout !` |
+   | les deux montent ensemble, et pas de son | l'audio est bien sorti du logiciel : c'est l'ampli (GPIO53), le volume du codec (`output_volume` dans `fdaudio:`) ou le câblage |
+   | acceptés < proposés | le haut-parleur n'arrive pas à suivre : le son sera haché |
 2. **Boucle locale** — interrupteur `Test audio (boucle micro vers
    haut-parleur)`, ou le bouton « Test micro » sur l'écran. Parlez devant la
    sonnette : vous devez vous entendre. Si oui, **toute la chaîne audio de
