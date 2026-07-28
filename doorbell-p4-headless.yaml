@@ -1,11 +1,3 @@
-# Sonnette ESP32-P4 SANS ÉCRAN — carte P4 evboard, codec ES8311/ES7210.
-#
-# C'est `doorbell-lvgl.yaml` dont on a retiré l'écran, LVGL et l'aperçu caméra.
-# Rien d'autre ne change : même caméra, même codec audio, même serveur RTSP.
-#
-# À ne pas confondre avec `doorbell.yaml`, qui décrit un montage DIFFÉRENT :
-# micro INMP441 et ampli MAX98357A câblés en I2S brut, sans codec. Les deux sont
-# valables, mais leurs blocs audio ne sont pas interchangeables.
 
 substitutions:
   name: doorbell-p4
@@ -59,8 +51,7 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-# L'ESP32-P4 N'A PAS DE RADIO. Le Wi-Fi passe par le compagnon ESP32-C6, et sans
-# ce bloc `wifi:` ne peut rien faire — l'appareil ne se connectera jamais.
+
 esp32_hosted:
   variant: ESP32C6
   reset_pin: GPIO54
@@ -74,8 +65,7 @@ esp32_hosted:
   use_psram: true
   slot: 1
 
-# La PSRAM hexadécimale du P4 se déclare ici, pas seulement en sdkconfig : les
-# tampons de la caméra et du JPEG y vivent, et sans elle l'allocation échoue.
+
 psram:
   mode: hex
   speed: 200MHz
@@ -97,9 +87,7 @@ update:
     source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
     name: C6 Firmware
 
-# `refresh: 0s` sur CHAQUE bloc. Par défaut ESPHome garde un clone en cache un
-# jour entier, indexé sur le NOM de la branche et non sur le commit : sans ça,
-# une branche qui avance ne change rien à la compilation suivante.
+
 external_components:
   - source:
       type: git
@@ -192,20 +180,10 @@ rtsp_server:
   path: /doorbell
   username: !secret rtsp_username
   password: !secret rtsp_password
-  # La chaîne MJPEG coûte DEUX sessions RTSP à go2rtc (transcodage + backchannel).
-  # 4 laisse de la marge pour un VLC de diagnostic.
   max_clients: 4
-
-  # Annonce la piste `sendonly` à tout le monde, pas seulement au client qui
-  # envoie l'en-tête ONVIF. Sans ça, go2rtc et les cartes Lovelace ne voient pas
-  # que la caméra sait parler, et le bouton micro n'apparaît jamais.
   backchannel: always
 
   video:
-    # `camera_id` est OBLIGATOIRE dès que `esp_cam_sensor:` est déclaré : sinon
-    # les deux composants ouvrent /dev/video0 chacun de leur côté et se le
-    # disputent. Sans écran, personne d'autre ne dépile les tampons V4L2, donc
-    # le serveur s'en charge : drive_camera reste à `true` (le défaut).
     camera_id: p4_cam
     framerate: 15
     jpeg_quality: 25
@@ -215,15 +193,11 @@ rtsp_server:
     sample_rate: 16000
     microphone_id: board_microphone
     speaker_id: board_speaker
-    # Mesuré sur cette carte : le codec seul délivre environ -58 dBFS, ce qui est
-    # inaudible. 8.0 = +18 dB. Ajustez en lisant `max/60s` dans les logs, cible
-    # -30..-6 dBFS en parlant devant la sonnette.
     gain: 8.0
     volume: 0.8
     half_duplex: true
     talk_timeout: 300ms
 
-  # Ces déclencheurs appartiennent au serveur RTSP, PAS au bloc `speaker:`.
   on_talk_start:
     - switch.turn_on: audio_amplifier
     - light.turn_on: status_led
@@ -234,7 +208,6 @@ rtsp_server:
 ##  Sonnerie — les trois chemins vers Home Assistant
 ## ===========================================================================
 
-# L'entité que Home Assistant comprend nativement comme une sonnette.
 event:
   - platform: template
     id: doorbell_event
@@ -265,7 +238,6 @@ binary_sensor:
     name: "Micro actif"
     device_class: problem
     entity_category: diagnostic
-    # À l'envers exprès : ON = il y a un problème, la source ne délivre plus rien.
     lambda: 'return !id(doorbell_stream).mic_alive();'
   - platform: template
     name: "Sortie audio en defaut"
@@ -321,17 +293,12 @@ switch:
     pin: GPIO33
     restore_mode: ALWAYS_OFF
 
-  # L'ampli de CETTE carte est sur GPIO53, pas GPIO28 (qui appartient au montage
-  # MAX98357A de `doorbell.yaml`).
   - platform: gpio
     id: audio_amplifier
     name: "Amplificateur audio"
     pin: GPIO53
     restore_mode: ALWAYS_ON
 
-  # Test d'établi : parlez, vous devez vous entendre. Il s'arrête tout seul au
-  # bout de deux minutes — micro et haut-parleur partagent la carte, et la boucle
-  # part en Larsen tout en disputant le haut-parleur au vrai backchannel.
   - platform: template
     name: "Test audio (boucle micro vers haut-parleur)"
     id: audio_loopback_switch
@@ -367,8 +334,6 @@ sensor:
     update_interval: 10s
     accuracy_decimals: 0
 
-  # Le niveau du micro sur une minute glissante. L'instantané retombe en une
-  # seconde et ne veut rien dire à l'échelle d'un capteur.
   - platform: template
     name: "Niveau micro"
     unit_of_measurement: dBFS
@@ -389,8 +354,6 @@ sensor:
     update_interval: 5s
     lambda: 'return id(doorbell_stream).speaker_peak_hold_db();'
 
-  # Reste à 0 pendant qu'on parle depuis Home Assistant = la voix descendante
-  # n'atteint pas l'appareil ; le défaut est en amont.
   - platform: template
     name: "Paquets audio recus"
     accuracy_decimals: 0
@@ -399,8 +362,7 @@ sensor:
     update_interval: 5s
     lambda: 'return id(doorbell_stream).audio_packets_received();'
 
-  # Doivent rester égaux. Un écart ne s'entend pas comme une perte de qualité,
-  # il s'entend comme rien du tout.
+
   - platform: template
     name: "Octets audio proposes au HP"
     accuracy_decimals: 0
