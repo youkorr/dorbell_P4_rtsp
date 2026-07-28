@@ -201,6 +201,12 @@ class RTSPServer : public Component, public RtpSender {
   /// against the network task, which owns `sessions_`.
   volatile uint8_t negotiated_mask_{0};
   uint32_t last_status_ms_{0};
+  /// DESCRIBEs seen, and how many of them asked for the ONVIF backchannel.
+  /// Zero of the latter means nobody ever tried to talk -- which is the normal
+  /// state until a viewer opens the stream with a microphone, and must not be
+  /// read as a fault.
+  volatile uint32_t describes_total_{0};
+  volatile uint32_t describes_with_backchannel_{0};
 
   /// Periodic one-block summary of the whole chain, for diagnosis.
   void log_status_();

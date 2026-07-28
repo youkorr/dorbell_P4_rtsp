@@ -351,9 +351,29 @@ void RTSPServer::log_status_() {
   const auto yn = [](bool b) { return b ? "yes" : "NO "; };
 
   ESP_LOGI(TAG, "--- status ------------------------------------------------");
-  ESP_LOGI(TAG, "  clients=%u playing=%u | negotiated by the last client: video=%s audio=%s backchannel=%s",
+  // The mask is the OR across every PLAYing session, not the last one to
+  // arrive: with a transcoding chain the device serves two connections, and
+  // reporting only the most recent made the backchannel look absent while
+  // another session held it.
+  ESP_LOGI(TAG, "  clients=%u playing=%u | negotiated across all sessions: video=%s audio=%s backchannel=%s",
            static_cast<unsigned>(this->client_count_), static_cast<unsigned>(this->active_streams_),
            yn((mask & 0x01) != 0), yn((mask & 0x02) != 0), yn((mask & 0x04) != 0));
+
+  // Why the backchannel is absent, which is a different question from whether
+  // it is absent -- and the two have opposite fixes.
+  if ((mask & 0x04) == 0) {
+    if (this->describes_with_backchannel_ == 0) {
+      ESP_LOGI(TAG,
+               "         no client has ASKED to talk yet (%" PRIu32 " DESCRIBEs, none with the ONVIF Require "
+               "header). Normal until a viewer opens the stream with a microphone -- nothing to fix here.",
+               this->describes_total_);
+    } else {
+      ESP_LOGW(TAG,
+               "         %" PRIu32 " client(s) asked for the backchannel but never set the track up: look at "
+               "the SDP and at the client, not at the wiring",
+               this->describes_with_backchannel_);
+    }
+  }
   ESP_LOGI(TAG, "  video: %" PRIu32 " encoded, %" PRIu32 " skipped | tx: %" PRIu32 " packets, %" PRIu32
                 " frames dropped",
            this->video_.frames_encoded(), this->video_.frames_dropped(), this->tx_overflows_,
@@ -379,12 +399,18 @@ void RTSPServer::log_status_() {
       // The line that answers "I press the test beep and hear nothing". The
       // speaker reports how much it took; offered without written means the
       // sink refuses the data and no volume setting will ever produce a sound.
+      const uint32_t offered = this->audio_.speaker_bytes_offered();
+      const char *verdict = "";
+      if (offered == 0) {
+        // Not a fault, and the distinction matters: nothing has been sent to the
+        // speaker, so it has had no chance to fail. Press the test beep before
+        // suspecting the output at all.
+        verdict = "   (nothing played yet -- press the test beep)";
+      } else if (this->audio_.speaker_bytes_written() == 0) {
+        verdict = "   <-- THE SPEAKER IS REFUSING EVERYTHING";
+      }
       ESP_LOGI(TAG, "         %" PRIu32 " bytes offered, %" PRIu32 " accepted, %" PRIu32 " short writes%s",
-               this->audio_.speaker_bytes_offered(), this->audio_.speaker_bytes_written(),
-               this->audio_.speaker_drops(),
-               (this->audio_.speaker_bytes_offered() > 0 && this->audio_.speaker_bytes_written() == 0)
-                   ? "   <-- THE SPEAKER IS REFUSING EVERYTHING"
-                   : "");
+               offered, this->audio_.speaker_bytes_written(), this->audio_.speaker_drops(), verdict);
     } else {
       ESP_LOGI(TAG, "  spk:   no speaker configured -- backchannel disabled, nothing can come out");
     }
@@ -644,8 +670,25 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
 
   if (method == "DESCRIBE") {
     const std::string require = to_lower(header_value(request, "Require"));
-    session.wants_backchannel =
-        require.find("www.onvif.org/ver20/backchannel") != std::string::npos && this->audio_.has_speaker();
+    const bool asked = require.find("www.onvif.org/ver20/backchannel") != std::string::npos;
+    session.wants_backchannel = asked && this->audio_.has_speaker();
+
+    // Counted separately so the status block can distinguish the two ways the
+    // talk path stays silent, which look identical from Home Assistant:
+    //   describes_with_backchannel_ == 0 -> nobody ever ASKED to talk. The
+    //     device is fine; go2rtc only requests the backchannel when a consumer
+    //     actually wants to send audio, so this is normal until a browser opens
+    //     the stream with a microphone.
+    //   asked, but the track is never SETUP -> the client asked and gave up,
+    //     which points at the SDP or at the client.
+    this->describes_total_++;
+    if (asked) {
+      this->describes_with_backchannel_++;
+      if (!this->audio_.has_speaker())
+        ESP_LOGW(TAG, "a client asked for the ONVIF backchannel but no speaker is configured");
+      else
+        ESP_LOGI(TAG, "backchannel requested by the client; announcing the sendonly track");
+    }
 
     const std::string local_ip = this->local_ip_of_(session.fd);
     const std::string sdp = this->build_sdp_(local_ip, session.wants_backchannel);
