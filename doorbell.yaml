@@ -117,6 +117,14 @@ rtsp_server:
   # backchannel). 3 laisse de la marge pour un VLC de diagnostic.
   max_clients: 3
 
+  # Announce the ONVIF `sendonly` track to every client, not just to one that
+  # sends the `Require` header. That is what makes two-way audio DISCOVERABLE:
+  # go2rtc, Frigate and the Lovelace cards decide whether a camera can be talked
+  # to by probing the stream, and a track advertised only on request is invisible
+  # to that probe -- so the talk button never appears, on a device whose
+  # backchannel works perfectly. Set `auto` for strict ONVIF behaviour.
+  backchannel: always
+
   video:
     # MJPEG only. The P4 has a hardware H.264 encoder, but nothing on the chip
     # decodes H.264 back, and the encoder consumes YUV420 while an LVGL preview

@@ -56,6 +56,17 @@ class RTSPServer : public Component, public RtpSender {
   void set_path(const std::string &path) { this->path_ = path; }
   void set_credentials(const std::string &user, const std::string &password);
   void set_max_clients(uint8_t max_clients) { this->max_clients_ = max_clients; }
+  /// When true, the `sendonly` backchannel track is announced in every SDP,
+  /// even to a client that did not send the ONVIF `Require` header.
+  ///
+  /// ONVIF says to announce it only on request, and that is the default. But a
+  /// track that is only announced on request is INVISIBLE to anything that
+  /// merely probes the stream -- and go2rtc, Frigate and the Lovelace camera
+  /// cards all decide "does this camera support two-way audio?" from exactly
+  /// such a probe. The result is a talk button that never appears, on a device
+  /// whose backchannel works perfectly. Announcing it always makes the
+  /// capability discoverable.
+  void set_always_advertise_backchannel(bool always) { this->always_advertise_backchannel_ = always; }
   void set_packet_size(uint16_t size) { this->packet_size_ = size; }
   void set_video_config(const VideoPipeline::Config &config) {
     this->video_config_ = config;
@@ -168,6 +179,7 @@ class RTSPServer : public Component, public RtpSender {
   std::string auth_token_;  ///< pre-computed "Basic <base64>" value, empty = open
   uint8_t max_clients_{2};
   uint16_t packet_size_{1400};
+  bool always_advertise_backchannel_{false};
 
   bool video_enabled_{false};
   bool audio_enabled_{false};

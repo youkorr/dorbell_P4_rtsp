@@ -51,6 +51,7 @@ CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_MAX_CLIENTS = "max_clients"
 CONF_PACKET_SIZE = "packet_size"
+CONF_BACKCHANNEL = "backchannel"
 
 CONF_VIDEO = "video"
 CONF_CODEC = "codec"
@@ -103,6 +104,16 @@ MIC_MODES = {
 
 # Mapped straight onto `*_right_slot` in the C++ config.
 CHANNELS = {"left": False, "right": True}
+
+# How the ONVIF `sendonly` track is advertised in the SDP.
+#   auto   - only to a client that sent `Require: www.onvif.org/ver20/backchannel`
+#            (what ONVIF specifies, and what a plain VLC/ffmpeg client expects)
+#   always - to everybody, so the capability is DISCOVERABLE. go2rtc, Frigate and
+#            the Lovelace camera cards decide whether a camera does two-way audio
+#            by probing the stream; a track announced only on request is invisible
+#            to that probe, and the talk button never appears even though the
+#            backchannel works.
+BACKCHANNEL_MODES = {"auto": False, "always": True}
 
 
 def _selected(value):
@@ -288,6 +299,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_PASSWORD): cv.string,
             cv.Optional(CONF_MAX_CLIENTS, default=2): cv.int_range(min=1, max=4),
             cv.Optional(CONF_PACKET_SIZE, default=1400): cv.int_range(min=512, max=1460),
+            cv.Optional(CONF_BACKCHANNEL, default="auto"): cv.enum(BACKCHANNEL_MODES, lower=True),
             cv.Optional(CONF_VIDEO, default={}): VIDEO_SCHEMA,
             cv.Optional(CONF_AUDIO): AUDIO_SCHEMA,
             cv.Optional(CONF_ON_CLIENT_CONNECTED): automation.validate_automation(
@@ -376,6 +388,7 @@ async def to_code(config):
     cg.add(var.set_path(config[CONF_PATH]))
     cg.add(var.set_max_clients(config[CONF_MAX_CLIENTS]))
     cg.add(var.set_packet_size(config[CONF_PACKET_SIZE]))
+    cg.add(var.set_always_advertise_backchannel(BACKCHANNEL_MODES[_selected(config[CONF_BACKCHANNEL])]))
 
     if CONF_USERNAME in config or CONF_PASSWORD in config:
         cg.add(var.set_credentials(config.get(CONF_USERNAME, ""), config.get(CONF_PASSWORD, "")))

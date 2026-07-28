@@ -1063,8 +1063,9 @@ contrainte du §4 ter, et elle vient de notre transcodage MJPEG, pas de la carte
 
 ## 7. Vérifier que l'audio bidirectionnel est bien négocié
 
-1. Ouvrez l'interface de go2rtc : `http://192.168.1.10:1984`.
-2. Sur le flux `doorbell`, cliquez **probe**. Vous devez voir **trois** pistes :
+1. Ouvrez l'interface de go2rtc : `http://192.168.1.38:1984`.
+2. Cliquez **probe** sur le flux qui PORTE le backchannel. Vous devez voir
+   **trois** pistes :
 
    ```
    video, recvonly, JPEG
@@ -1072,13 +1073,57 @@ contrainte du §4 ter, et elle vient de notre transcodage MJPEG, pas de la carte
    audio, sendonly, PCMU/8000     <-- le backchannel
    ```
 
-   Sondez le flux **`doorbell`** (la source RTSP), pas `doorbell_webrtc`.
+   > **Sondez `doorbell_webrtc`, pas `doorbell`.** Une version précédente de
+   > cette page disait l'inverse, et c'était une perte de temps garantie :
+   > `doorbell` porte `#backchannel=0`, il *renonce* explicitement au
+   > backchannel, et n'affichera donc jamais la piste `sendonly`, même sur une
+   > chaîne parfaitement saine. La piste vit sur `doorbell_webrtc`, dont la
+   > seconde source porte `#backchannel=1`.
 
-   Si la troisième ligne manque, go2rtc n'a pas demandé le backchannel : c'est
-   presque toujours un `#` de trop dans l'URL (voir `go2rtc/go2rtc.yaml`).
+   Si la troisième ligne manque **sur `doorbell_webrtc`**, deux causes possibles :
+   un `#` de trop dans l'URL (voir `go2rtc/go2rtc.yaml`), ou le P4 qui n'annonce
+   la piste que sur demande — voir juste en dessous.
 3. Passez `log: {rtsp: trace}` dans go2rtc et relancez : la requête `DESCRIBE`
    doit porter l'en-tête `Require: www.onvif.org/ver20/backchannel`, et le SDP
    renvoyé par le P4 doit contenir `a=sendonly`.
+
+### Le bouton micro n'apparaît pas, même en HTTPS : `backchannel: always`
+
+C'est la panne la plus déroutante de toute la chaîne, parce que **tout
+fonctionne** et que rien ne s'affiche.
+
+L'enchaînement :
+
+1. ONVIF dit d'annoncer la piste `sendonly` **uniquement** au client qui envoie
+   `Require: www.onvif.org/ver20/backchannel`. C'était le comportement du
+   composant, et il est correct.
+2. Mais go2rtc, Frigate et les cartes Lovelace décident si une caméra sait
+   parler en **sondant** le flux — un DESCRIBE ordinaire, sans cet en-tête.
+3. La piste n'est donc pas annoncée à ce sondage. Frigate conclut « pas d'audio
+   bidirectionnel », la carte n'affiche pas le bouton micro, et personne ne
+   demande jamais le backchannel.
+4. Le bloc de statut du P4 le confirme : `backchannel=NO`, et *zéro* DESCRIBE
+   portant l'en-tête ONVIF.
+
+Une capacité qui n'existe que sur demande est invisible à qui ne sait pas
+qu'elle existe. D'où l'option :
+
+```yaml
+rtsp_server:
+  backchannel: always   # `auto` = comportement ONVIF strict, le défaut
+```
+
+`always` annonce la piste à tout le monde. Frigate et go2rtc voient enfin une
+caméra capable de parler, et le bouton apparaît.
+
+> Ne cherchez pas `capabilities: force:` du côté de la carte : cette clé
+> n'existe ni en 7.27.4 ni sur `main` (le schéma n'a que `disable` et
+> `disable_except`). Une configuration trouvée sur internet qui l'utilise est
+> périmée, et la recopier ne fera que casser la validation.
+
+Après le changement, resondez `doorbell_webrtc` : la ligne `audio, sendonly`
+doit être là. Si elle y est et que le bouton manque toujours, c'est alors la
+contrainte des deux sources du §4 ter.
 
 ## 7 bis. « Je ne sais pas si le micro et l'audio fonctionnent »
 

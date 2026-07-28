@@ -671,7 +671,11 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
   if (method == "DESCRIBE") {
     const std::string require = to_lower(header_value(request, "Require"));
     const bool asked = require.find("www.onvif.org/ver20/backchannel") != std::string::npos;
-    session.wants_backchannel = asked && this->audio_.has_speaker();
+    // `backchannel: always` announces the sendonly track to everyone, so that a
+    // client which only probes the stream can still SEE that this camera can be
+    // talked to. Without it the capability exists but is undiscoverable, and
+    // every card that asks "does it do two-way audio?" answers no.
+    session.wants_backchannel = (asked || this->always_advertise_backchannel_) && this->audio_.has_speaker();
 
     // Counted separately so the status block can distinguish the two ways the
     // talk path stays silent, which look identical from Home Assistant:

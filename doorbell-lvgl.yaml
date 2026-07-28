@@ -203,6 +203,14 @@ rtsp_server:
   password: !secret rtsp_password
   max_clients: 4
 
+  # Annonce la piste `sendonly` du backchannel A TOUT LE MONDE, pas seulement au
+  # client qui envoie l'en-tête ONVIF `Require`. C'est ce qui rend la capacité
+  # « audio bidirectionnel » VISIBLE : go2rtc, Frigate et les cartes Lovelace
+  # decident si une caméra sait parler en sondant le flux, et une piste annoncée
+  # seulement sur demande est invisible à ce sondage. Sans ça, le bouton micro
+  # n'apparaît jamais — sur un appareil dont le backchannel fonctionne pourtant.
+  backchannel: always
+
   video:
     # MJPEG, et rien d'autre. Le P4 sait encoder du H.264 mais pas le décoder :
     # l'aperçu LVGL ne pourrait pas le réafficher, et son encodeur veut du YUV420

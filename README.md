@@ -145,6 +145,14 @@ Deux configurations complètes et commentées :
 | `username` / `password` | — | authentification Basic ; absentes ⇒ flux ouvert |
 | `max_clients` | `2` | connexions RTSP simultanées |
 | `packet_size` | `1400` | taille maximale d'un paquet RTP |
+| `backchannel` | `auto` | `auto` = piste `sendonly` annoncée seulement au client qui envoie l'en-tête ONVIF `Require` (comportement strict) ; `always` = annoncée à tout le monde |
+
+**`backchannel: always` est ce qui fait apparaître le bouton « parler »** dans
+Home Assistant. go2rtc, Frigate et les cartes Lovelace décident si une caméra
+sait parler en *sondant* le flux — un DESCRIBE ordinaire, sans en-tête ONVIF. En
+`auto`, la piste n'est pas annoncée à ce sondage, donc la capacité existe mais
+reste invisible : le bouton n'apparaît jamais, sur un appareil dont le
+backchannel fonctionne pourtant parfaitement.
 
 ### `rtsp_server.video`
 
