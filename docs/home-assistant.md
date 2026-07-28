@@ -772,6 +772,40 @@ Home Assistant la main sur un navigateur précis. C'est ce qu'il faut pour une
 tablette murale ou un PC de bureau qui doit afficher le visiteur sans qu'on
 touche à rien.
 
+#### L'installer vraiment — HACS ne fait que la moitié du travail
+
+C'est le piège classique, et il ne dit pas son nom : **HACS télécharge des
+fichiers, il n'ajoute pas l'intégration.** Après le redémarrage, Browser Mod
+n'apparaît nulle part, et on croit que l'installation a échoué. Il manque une
+étape :
+
+1. HACS → Browser Mod → **Télécharger** ;
+2. **redémarrer** Home Assistant ;
+3. **Paramètres → Appareils et services → « + Ajouter une intégration » →
+   taper « Browser Mod »**. ← *c'est cette étape qui manque* ;
+4. rafraîchir le navigateur en vidant le cache (**Ctrl+Shift+R**), sans quoi le
+   module frontend n'est pas chargé et rien ne s'enregistre.
+
+Après quoi « Browser Mod » apparaît dans la barre latérale, et dans
+Paramètres → Appareils et services.
+
+Si Browser Mod ne sort pas dans la liste des intégrations à l'étape 3 : le
+téléchargement HACS ne s'est pas terminé, ou le redémarrage n'en était pas un —
+un simple « recharger la configuration » ne suffit pas, il faut un vrai
+redémarrage (Paramètres → Système → ⏻ → **Redémarrer Home Assistant**).
+
+#### Enregistrer les navigateurs
+
+Un `browser_id` n'existe pas tant que le navigateur ne s'est pas déclaré. Sur
+**chaque** appareil que vous voulez piloter — la tablette de l'entrée, le PC —
+ouvrez Home Assistant, allez dans le panneau **Browser Mod**, et activez
+**« Register »** pour ce navigateur. Donnez-lui au passage un nom lisible
+(`tablette-entree` plutôt que l'identifiant aléatoire) : c'est ce nom que
+l'automatisation ci-dessous désigne.
+
+Un navigateur non enregistré n'est pas une erreur visible : l'automatisation
+s'exécute, ne trouve pas la cible, et il ne se passe simplement rien.
+
 Chaque navigateur enregistré reçoit un `browser_id`, lisible dans
 **Paramètres → Browser Mod**.
 
