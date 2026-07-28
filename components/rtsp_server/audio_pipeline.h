@@ -209,6 +209,9 @@ class AudioPipeline {
   static void render_bar_(char *dst, float level);
   /// Record one write to the sink: how much was offered, how much it took.
   void account_write_(const int16_t *src, size_t offered_bytes, size_t written_bytes, size_t bytes_per_sample);
+  /// Push every byte to the ESPHome speaker, re-offering what it did not take.
+  /// Returns the total accepted, which is short only if the deadline expired.
+  size_t push_all_(const uint8_t *data, size_t len);
   /// Append one buffer's worth of test tone to the playback path, if pending.
   size_t take_test_tone_(int16_t *dst, size_t samples);
 

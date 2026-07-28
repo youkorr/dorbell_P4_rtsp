@@ -40,6 +40,11 @@ static constexpr float SILENCE_DBFS = -100.0f;
 /// Window of the long-hold meters: long enough that a status line printed every
 /// ten seconds still catches a spoken word.
 static constexpr int64_t PEAK_HOLD_LONG_US = 60000000;
+/// How long one 20 ms block may spend getting into the speaker before we accept
+/// that we are behind and drop the rest. Three times real time: enough to ride
+/// out a sink that hands back its buffer in small pieces, short enough that a
+/// genuinely stalled speaker does not drag the whole playback task down.
+static constexpr int64_t WRITE_DEADLINE_US = 60000;
 /// The loopback monitor stops itself after this long. Ample for the test it
 /// exists for, and short enough that forgetting it on is harmless.
 static constexpr int64_t LOOPBACK_TIMEOUT_US = 120000000;
@@ -171,6 +176,33 @@ size_t AudioPipeline::read_pcm_(int16_t *dst, size_t samples) {
   return got;
 }
 
+size_t AudioPipeline::push_all_(const uint8_t *data, size_t len) {
+  // `play()` takes what fits and RETURNS how much that was -- it is not
+  // all-or-nothing. Calling it once and moving on discards the remainder, which
+  // punches a hole in the audio on every single packet: the speaker looked like
+  // it was "refusing 42%" when in truth it was being asked once, told "384 of
+  // 640", and never offered the other 256 bytes again. Twenty milliseconds of
+  // speech with a quarter cut out of each packet is not quiet, it is unusable.
+  //
+  // So keep offering the remainder until it is all in, or until the deadline
+  // says we are genuinely behind and dropping is the honest answer.
+  const int64_t deadline = esp_timer_get_time() + WRITE_DEADLINE_US;
+  size_t sent = 0;
+
+  while (sent < len) {
+    const size_t n = this->external_speaker_->play(data + sent, len - sent, pdMS_TO_TICKS(10));
+    sent += n;
+    if (sent >= len)
+      break;
+    if (esp_timer_get_time() > deadline)
+      break;
+    // Nothing moved: give the sink a chance to drain rather than spin on it.
+    if (n == 0)
+      vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  return sent;
+}
+
 void AudioPipeline::account_write_(const int16_t *src, size_t offered_bytes, size_t written_bytes,
                                    size_t bytes_per_sample) {
   this->speaker_bytes_offered_ += static_cast<uint32_t>(offered_bytes);
@@ -219,10 +251,7 @@ void AudioPipeline::write_pcm_(const int16_t *src, size_t samples) {
     }
 
     const size_t offered = samples * sizeof(int16_t);
-    // Wait briefly rather than drop on a momentarily full ring buffer: 20 ms is
-    // one packet, so this bounds the latency to what we would have added anyway.
-    const size_t written =
-        this->external_speaker_->play(reinterpret_cast<const uint8_t *>(src), offered, pdMS_TO_TICKS(20));
+    const size_t written = this->push_all_(reinterpret_cast<const uint8_t *>(src), offered);
     this->account_write_(src, offered, written, sizeof(int16_t));
     return;
   }
