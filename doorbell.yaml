@@ -54,8 +54,8 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
-      ref: claude/doorbell-p4-rtsp-audio-gkdosc
-    components: [esp_video]
+      ref: claude/usb-uvc-consumer-integration-gnbflf
+    components: [esp_video, esp_cam_sensor]
     refresh: 0s
 
 logger:
