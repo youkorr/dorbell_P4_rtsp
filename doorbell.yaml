@@ -1,6 +1,6 @@
-# NOTE : ce fichier est un EXEMPLE à copier dans /config/esphome/.
-# `external_components` ne récupère que `components/`, pas ce YAML : après une
-# mise à jour du dépôt, recopiez ce fichier si vous voulez les corrections.
+# NOTE: this file is an EXAMPLE, to be copied into /config/esphome/.
+# `external_components` only fetches `components/`, never this YAML: after a
+# repository update, copy this file again if you want the fixes.
 # ESP32-P4 smart doorbell: MIPI-CSI camera + RTSP with two-way audio.
 #
 #   OV5647 --MIPI CSI--> ESP32-P4 --MJPEG/RTSP--> go2rtc --WebRTC--> Home Assistant
@@ -36,15 +36,14 @@ esp32:
       CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
       CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
 
-# NOTE: `rtsp_server` vit pour l'instant sur la branche de travail ci-dessous.
-# Une fois la PR fusionnee, remplacez ces deux `ref:` par `main`.
+# NOTE: `rtsp_server` currently lives on the working branch below. Replace both
+# `ref:` values with `main` once the PR is merged.
 #
-# `refresh: 0s` n'est pas cosmetique. Par defaut ESPHome garde un clone en cache
-# pendant UN JOUR, et il est indexe sur le NOM de la branche, pas sur le commit :
-# si la branche avance, une compilation faite dans les 24 h precedentes continue
-# d'utiliser l'ancien code, en silence. C'est ce qui produit des erreurs du genre
-# « Unable to find action with the name 'rtsp_server.play_test_tone' » alors que
-# l'action existe bel et bien dans le depot.
+# `refresh: 0s` is not cosmetic. By default ESPHome keeps a cached clone for A
+# WHOLE DAY, keyed on the branch NAME rather than the commit: if the branch moves
+# forward, a build made in the previous 24 hours keeps using the old code, in
+# silence. That is what produces errors such as "Unable to find action with the
+# name 'rtsp_server.play_test_tone'" when the action does exist in the repo.
 external_components:
   - source:
       type: git
@@ -113,8 +112,8 @@ rtsp_server:
   path: /doorbell
   username: !secret rtsp_username
   password: !secret rtsp_password
-  # En MJPEG, go2rtc ouvre DEUX sessions RTSP (le transcodage H.264 + le
-  # backchannel). 3 laisse de la marge pour un VLC de diagnostic.
+  # With MJPEG, go2rtc opens TWO RTSP sessions (the H.264 transcode plus the
+  # backchannel). 3 leaves room for a VLC while debugging.
   max_clients: 3
 
   # Announce the ONVIF `sendonly` track to every client, not just to one that

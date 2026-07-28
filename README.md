@@ -1,230 +1,201 @@
 # dorbell_P4_rtsp
 
-Composant externe ESPHome : **serveur RTSP avec audio bidirectionnel (backchannel
-ONVIF) pour ESP32-P4**, pour une sonnette connectée.
+ESPHome external component: an **RTSP server with two-way audio (ONVIF
+backchannel) for the ESP32-P4**, built for a video doorbell.
 
 ```
 OV5647 ──MIPI CSI──► ESP32-P4 ──MJPEG + G.711 / RTSP──► go2rtc ──WebRTC──► Home Assistant
-                                ◄──── G.711 backchannel (parler) ────
+                                ◄──── G.711 backchannel (talk) ────
 ```
 
-Le composant n'initialise aucun écran et n'embarque aucune bibliothèque
-graphique : il fonctionne en *headless*. Il sait toutefois partager la caméra
-avec LVGL quand la carte a un écran, pour un banc de test avec aperçu local
-(voir `doorbell-lvgl.yaml`).
+The component initialises no display and pulls in no graphics library: it runs
+headless. It can nevertheless share the camera with LVGL when the board has a
+screen, so the same frame feeds a local preview and the network stream.
 
-## Ce que fait le composant
+## What it does
 
 | | |
 |---|---|
-| Vidéo | **MJPEG**, encodeur JPEG matériel du P4, RTP selon RFC 2435 |
-| Source vidéo | caméra `esp_cam_sensor` partagée avec LVGL, **ou** V4L2 direct (`esp_video`) |
-| Audio montant | micro → G.711 (PCMU/PCMA) 8 kHz → RTP |
-| Audio descendant | RTP backchannel ONVIF → G.711 → haut-parleur |
-| Source audio | composants ESPHome `microphone`/`speaker` (fdaudio, i2s_audio…) **ou** broches I2S brutes |
-| Transport | RTP entrelacé sur la connexion RTSP TCP (RFC 2326 §10.12) |
-| Chemin des données | zéro copie : le tampon DMA de la caméra est encodé sur place |
-| Diagnostic audio | vumètre micro, compteurs de paquets, boucle locale, bip de test |
-| Authentification | Basic, optionnelle |
+| Video | **MJPEG**, the P4's hardware JPEG encoder, RTP per RFC 2435 |
+| Video source | an `esp_cam_sensor` camera shared with LVGL, **or** the `esp_video` V4L2 device directly |
+| Audio up | microphone → G.711 (PCMU/PCMA) 8 kHz → RTP |
+| Audio down | ONVIF backchannel RTP → G.711 → speaker |
+| Audio source | ESPHome `microphone`/`speaker` components (fdaudio, i2s_audio…) **or** raw I2S pins |
+| Transport | RTP interleaved over the RTSP TCP connection (RFC 2326 §10.12) |
+| Data path | zero copy: the camera's DMA buffer is encoded in place |
+| Diagnostics | microphone and speaker meters, packet counters, local loopback, test beep |
+| Authentication | Basic, optional |
 
-### Pourquoi MJPEG et seulement MJPEG
+## Requirements
 
-L'ESP32-P4 possède bien un encodeur H.264 matériel, et une version précédente de
-ce composant l'exposait. Il a été retiré, pour deux raisons qui ne se contournent
-pas :
+- an **ESP32-P4** board with PSRAM and an OV5647 (or other supported) MIPI-CSI
+  sensor;
+- a Wi-Fi companion — the P4 has no radio of its own, so an `esp32_hosted:`
+  block with an ESP32-C6 is mandatory;
+- **go2rtc**, standalone or inside Frigate, to republish the stream as WebRTC;
+- ESPHome 2025.5 or newer.
 
-- **le P4 ne sait pas décoder du H.264.** Ce qu'il encode, il ne peut pas le
-  réafficher : l'aperçu LVGL local était donc impossible en H.264 (il faudrait
-  câbler un décodeur logiciel comme `edge264`) ;
-- **les deux formats sont incompatibles dans le même flux de caméra.**
-  L'encodeur H.264 consomme du YUV420, LVGL affiche du RGB565. Une seule caméra
-  ne pouvait pas alimenter les deux : il fallait choisir entre l'écran et le
-  flux.
-
-MJPEG garde une unique trame RGB565 qui nourrit l'écran *et* le réseau, sans
-contrainte d'alignement gênante et sans attente de trame clé. Le prix à payer est
-le débit (~6-10 Mbit/s en 800×640 @ 15 fps), et le fait que WebRTC ne sache pas
-transporter du MJPEG : go2rtc lancera ffmpeg pour le convertir. Les modes MSE,
-MJPEG et les vignettes, eux, passent en direct.
-
-Côté audio, G.711 traverse en revanche toute la chaîne **sans transcodage** dans
-les deux sens : les navigateurs encodent et décodent nativement le PCMU/PCMA.
-
-## Installation
+## Quick start
 
 ```yaml
 external_components:
-  # `rtsp_server` vit pour l'instant sur cette branche de travail ; remplacez
-  # par `main` une fois la PR fusionnée.
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
-      ref: claude/doorbell-p4-rtsp-audio-gkdosc
+      ref: main
     components: [rtsp_server]
-  - source:
-      type: git
-      url: https://github.com/youkorr/esphome_esp-video
-      ref: claude/doorbell-p4-rtsp-audio-gkdosc
-    components: [esp_video]
+    refresh: 0s
 
 esp_video:
-  id: video
-  i2c_id: cam_i2c
+  i2c_id: bsp_bus
   enable_isp: true
+
+esp_cam_sensor:
+  id: p4_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647
+  resolution: "800x640"
 
 rtsp_server:
   id: doorbell_stream
   port: 8554
   path: /doorbell
+  backchannel: always
   video:
+    camera_id: p4_cam
     framerate: 15
     jpeg_quality: 25
   audio:
-    microphone:
-      bclk_pin: GPIO20
-      lrclk_pin: GPIO21
-      din_pin: GPIO22
-    speaker:
-      i2s_port: 1
-      bclk_pin: GPIO23
-      lrclk_pin: GPIO26
-      dout_pin: GPIO27
+    microphone_id: board_microphone
+    speaker_id: board_speaker
+    gain: 8.0
 ```
 
-### « Unable to find action with the name 'rtsp_server.play_test_tone' »
+> **Always set `refresh: 0s`.** ESPHome caches a git external component for a
+> whole day, keyed on the *branch name* rather than the commit. Without it, a
+> branch that moves forward changes nothing about your next build, silently.
 
-L'action existe : ce message veut dire qu'ESPHome compile une **ancienne copie**
-du composant. Deux causes, souvent combinées.
+### Three complete example configurations
 
-**1. Le `ref:` de votre YAML pointe ailleurs.** `external_components` ne récupère
-que `components/`, jamais les fichiers YAML : votre copie dans
-`/config/esphome/` garde le `ref:` que vous y aviez mis. Vérifiez qu'il dit bien
-`claude/doorbell-p4-rtsp-audio-gkdosc`.
+| File | Board | Screen |
+|---|---|---|
+| [`doorbell-lvgl.yaml`](doorbell-lvgl.yaml) | P4 evboard, ES8311/ES7210 codec | 1024×600 MIPI-DSI, LVGL preview |
+| [`doorbell-p4-headless.yaml`](doorbell-p4-headless.yaml) | the same board | none |
+| [`doorbell.yaml`](doorbell.yaml) | INMP441 + MAX98357A on raw I2S | none |
 
-**2. Le cache d'ESPHome.** Par défaut il garde un clone **un jour entier**, et il
-est indexé sur le *nom* de la branche, pas sur le commit. Une branche qui avance
-ne suffit donc pas : tant que le cache est valide, l'ancien code est réutilisé
-en silence. D'où le `refresh: 0s` sur chaque bloc `source:` des exemples.
+The first two describe the *same hardware*; the third is a different, minimal
+build with no audio codec. **Their audio blocks are not interchangeable** — the
+pin assignments belong to different boards.
 
-Si l'erreur persiste, videz le cache à la main :
-
-```bash
-rm -rf /config/esphome/.esphome/external_components
-```
-
-(ou, dans le module complémentaire ESPHome, le dossier `.esphome/external_components`
-à côté de vos YAML), puis recompilez.
-
-Pour vérifier que le bon code est arrivé, la sortie de `esphome logs` au
-démarrage doit montrer les lignes `Backchannel:` et `Half duplex:` dans le
-`dump_config` du serveur RTSP.
-
-Deux configurations complètes et commentées :
-
-- [`doorbell.yaml`](doorbell.yaml) — sonnette *headless* (sans écran), micro
-  INMP441 et ampli MAX98357A câblés en I2S ;
-- [`doorbell-lvgl.yaml`](doorbell-lvgl.yaml) — banc de test avec écran
-  MIPI-DSI 1024×600, aperçu caméra LVGL et audio via le codec de la carte
-  (`fdaudio` / ES8311 + ES7210). La caméra est partagée entre l'aperçu et le
-  flux RTSP.
+> The entity names in the example configs are in French (`Sonnette`, `Bouton`,
+> `Micro actif`…), because that is what the author's own installation uses and
+> renaming them would break existing automations. Home Assistant entity ids are
+> built from them, so the documentation refers to ids like
+> `event.<device>_sonnette`. Rename them freely in your own copy — just look the
+> real ids up in **Developer Tools → States** afterwards.
 
 ## Documentation
 
-- [`docs/hardware.md`](docs/hardware.md) — brochage GPIO, câblage I2S, contraintes de l'ESP32-P4, acoustique
-- [`docs/home-assistant.md`](docs/home-assistant.md) — carte Lovelace, bouton push-to-talk, automatisation de notification
-- [`go2rtc/go2rtc.yaml`](go2rtc/go2rtc.yaml) — configuration go2rtc prête à l'emploi
+- [`docs/home-assistant.md`](docs/home-assistant.md) — go2rtc, Frigate, the
+  Lovelace card, notifications, and the full troubleshooting table
+- [`docs/hardware.md`](docs/hardware.md) — GPIO map, I2S wiring, ESP32-P4
+  constraints, acoustics
+- [`go2rtc/go2rtc.yaml`](go2rtc/go2rtc.yaml) — a ready-to-use go2rtc config
+- [`frigate/frigate.yaml`](frigate/frigate.yaml) — a reference Frigate config
 
-## Référence de configuration
+## Configuration reference
 
 ### `rtsp_server`
 
-| Option | Défaut | Description |
+| Option | Default | Description |
 |---|---|---|
-| `port` | `8554` | port d'écoute RTSP |
-| `path` | `/doorbell` | chemin de l'URL RTSP |
-| `username` / `password` | — | authentification Basic ; absentes ⇒ flux ouvert |
-| `max_clients` | `2` | connexions RTSP simultanées |
-| `packet_size` | `1400` | taille maximale d'un paquet RTP |
-| `backchannel` | `auto` | `auto` = piste `sendonly` annoncée seulement au client qui envoie l'en-tête ONVIF `Require` (comportement strict) ; `always` = annoncée à tout le monde |
+| `port` | `8554` | RTSP listening port |
+| `path` | `/doorbell` | RTSP URL path |
+| `username` / `password` | — | Basic authentication; omit both for an open stream |
+| `max_clients` | `2` | simultaneous RTSP connections |
+| `packet_size` | `1400` | maximum RTP packet size |
+| `backchannel` | `auto` | `auto` announces the `sendonly` track only to a client that sends the ONVIF `Require` header; `always` announces it to everyone |
 
-**`backchannel: always` est ce qui fait apparaître le bouton « parler »** dans
-Home Assistant. go2rtc, Frigate et les cartes Lovelace décident si une caméra
-sait parler en *sondant* le flux — un DESCRIBE ordinaire, sans en-tête ONVIF. En
-`auto`, la piste n'est pas annoncée à ce sondage, donc la capacité existe mais
-reste invisible : le bouton n'apparaît jamais, sur un appareil dont le
-backchannel fonctionne pourtant parfaitement.
+**Set `backchannel: always` if you want a talk button in Home Assistant.**
+go2rtc, Frigate and the Lovelace cards decide whether a camera supports two-way
+audio by *probing* the stream — an ordinary DESCRIBE with no ONVIF header. Under
+`auto` the track is not announced to that probe, so the capability exists but is
+undiscoverable, and the button never appears on a device whose backchannel works
+perfectly.
 
 ### `rtsp_server.video`
 
-| Option | Défaut | Description |
+| Option | Default | Description |
 |---|---|---|
-| `camera_id` | — | caméra `esp_cam_sensor` à partager ; absent ⇒ V4L2 direct |
-| `drive_camera` | `true` | passez à `false` si `lvgl_camera_display` fait déjà le dequeue V4L2 |
-| `device` | `/dev/video0` | périphérique de capture MIPI-CSI (source directe) |
-| `framerate` | `15` | images par seconde |
-| `jpeg_quality` | `25` | 1 (min) à 100 (max) |
-| `buffer_count` | `2` | tampons de capture (2 = double buffering) |
-| `vflip` / `hflip` | `false` | retournement, appliqué par le capteur |
+| `camera_id` | — | `esp_cam_sensor` camera to share; omit for direct V4L2 |
+| `drive_camera` | `true` | set `false` when `lvgl_camera_display` already dequeues V4L2 buffers |
+| `device` | `/dev/video0` | MIPI-CSI capture device (direct source) |
+| `framerate` | `15` | frames per second |
+| `jpeg_quality` | `25` | 1 (worst) to 100 (best) |
+| `buffer_count` | `2` | capture buffers (2 = double buffering) |
+| `vflip` / `hflip` | `false` | flip, applied by the sensor |
 
-`codec:` n'accepte plus que `mjpeg`, et peut être omis. `codec: h264` est refusé
-à la validation, avec l'explication ci-dessus — plutôt que de servir
-silencieusement du MJPEG à une configuration qui comptait sur le passe-plat
-WebRTC.
+`codec:` accepts only `mjpeg` and may be omitted. `codec: h264` is rejected at
+validation — see [Why MJPEG only](#why-mjpeg-only).
+
+**If you declare `esp_cam_sensor:`, you must pass `camera_id:`.** Otherwise both
+components open `/dev/video0` independently and fight over it.
 
 ### `rtsp_server.audio`
 
-| Option | Défaut | Description |
+| Option | Default | Description |
 |---|---|---|
-| `codec` | `pcmu` | `pcmu` (µ-law) ou `pcma` (A-law) |
-| `sample_rate` | `16000` | fréquence PCM (`8000` ou `16000`) ; le réseau reste à 8 kHz |
-| `microphone_id` | — | composant ESPHome `microphone` (fdaudio, i2s_audio…) |
-| `speaker_id` | — | composant ESPHome `speaker` |
-| `half_duplex` | `true` | coupe le micro pendant que le correspondant parle |
-| `talk_timeout` | `300ms` | silence après lequel la communication est réputée terminée |
-| `microphone.mode` | `std` | `std` (I2S classique) ou `pdm` |
-| `microphone.bits_per_sample` | `32` | 32 pour un INMP441/ICS-43434 |
-| `microphone.channel` | `left` | slot I2S ; `left` = broche L/R à la masse |
-| `microphone.gain` | `4.0` | gain numérique appliqué avant compression |
-| `speaker.bits_per_sample` | `16` | 16 pour un MAX98357A |
-| `speaker.volume` | `0.8` | atténuation numérique (0.0 – 1.0) |
+| `codec` | `pcmu` | `pcmu` (µ-law) or `pcma` (A-law) |
+| `sample_rate` | `16000` | PCM rate (`8000` or `16000`); the wire stays at 8 kHz |
+| `microphone_id` | — | an ESPHome `microphone` component (fdaudio, i2s_audio…) |
+| `speaker_id` | — | an ESPHome `speaker` component |
+| `gain` | `4.0` | digital gain applied after the codec, 0.1 – 256 |
+| `volume` | `0.8` | digital attenuation on playback, 0.0 – 1.0 |
+| `half_duplex` | `true` | mute the microphone while the far end is talking |
+| `talk_timeout` | `300ms` | silence after which the call is considered over |
+| `microphone.mode` | `std` | `std` (classic I2S) or `pdm` |
+| `microphone.bits_per_sample` | `32` | 32 for an INMP441/ICS-43434 |
+| `microphone.channel` | `left` | I2S slot; `left` = L/R pin tied to ground |
+| `speaker.bits_per_sample` | `16` | 16 for a MAX98357A |
 
-Deux sources audio possibles, exclusives l'une de l'autre :
+Two mutually exclusive audio sources:
 
-- `microphone_id` + `speaker_id` — réutilise des composants ESPHome existants,
-  donc le codec de la carte reste partagé avec les autres usages ;
-- les blocs `microphone` / `speaker` — pilotage direct des broches I2S, pour une
-  sonnette minimale (INMP441 + MAX98357A).
+- `microphone_id` + `speaker_id` — reuse existing ESPHome components, so the
+  board's codec stays shared with other consumers;
+- the `microphone` / `speaker` blocks — direct I2S pin control, for a minimal
+  doorbell (INMP441 + MAX98357A).
 
-Sans haut-parleur (`speaker_id` ou bloc `speaker` absents), le backchannel est
-désactivé : le flux reste descendant et le SDP n'annonce plus de piste
-`sendonly`.
+With no speaker the backchannel is disabled: the stream stays one-way and the
+SDP advertises no `sendonly` track.
 
-### Déclencheurs
+### Triggers
 
 `on_client_connected`, `on_client_disconnected`, `on_talk_start`, `on_talk_end`.
 
-`on_talk_start` / `on_talk_end` encadrent la réception d'audio depuis Home
-Assistant : c'est là qu'on allume l'ampli et une LED (voir `doorbell.yaml`).
+`on_talk_start` / `on_talk_end` bracket incoming audio from Home Assistant — the
+place to switch an amplifier on and light an LED.
+
+> These belong to `rtsp_server:`, not to the `speaker:` block.
 
 ### Actions
 
-| Action | Ce qu'elle fait |
+| Action | What it does |
 |---|---|
-| `rtsp_server.set_loopback` | renvoie le micro dans le haut-parleur, localement |
-| `rtsp_server.play_test_tone` | joue un bip (`frequency`, `duration`) |
+| `rtsp_server.set_loopback` | routes the microphone to the speaker, locally |
+| `rtsp_server.play_test_tone` | plays a beep (`frequency`, `duration`) |
 
-### Depuis une lambda
+### From a lambda
 
 ```cpp
-id(doorbell_stream).client_count();   // uint8_t
-id(doorbell_stream).is_streaming();   // au moins un client en PLAY
-id(doorbell_stream).is_talking();     // audio backchannel en cours
-id(doorbell_stream).set_drive_camera(true);  // reprendre le dequeue V4L2
+id(doorbell_stream).client_count();          // uint8_t
+id(doorbell_stream).is_streaming();          // at least one client in PLAY
+id(doorbell_stream).is_talking();            // backchannel audio in progress
+id(doorbell_stream).set_drive_camera(true);  // take back the V4L2 dequeue
 ```
 
-## À quoi ressemble une chaîne qui fonctionne
+## What a healthy chain looks like
 
-Le bloc de statut d'une sonnette en pleine conversation, à garder comme étalon :
+The status block of a doorbell mid-conversation, worth keeping as a reference:
 
 ```
 --- status ------------------------------------------------
@@ -237,186 +208,205 @@ Le bloc de statut d'une sonnette en pleine conversation, à garder comme étalon
 -----------------------------------------------------------
 ```
 
-Les cinq lignes qui comptent, et ce qu'elles valident :
-
-| Lecture | Ce qu'elle prouve |
+| Reading | What it proves |
 |---|---|
-| `backchannel=yes` | la piste montante est négociée — c'est ce que `backchannel: always` rend possible |
-| `backchannel N received` avec N qui monte | la voix de Home Assistant atteint vraiment l'appareil |
-| `mic max/60s` entre −30 et −6 dBFS | le micro capte à un niveau exploitable |
-| `spk` qui bouge pendant qu'on parle | le son sort réellement |
-| **`offered == accepted`, `0 short writes`** | rien n'est perdu entre le décodage et le haut-parleur |
+| `backchannel=yes` | the upstream track is negotiated — what `backchannel: always` makes possible |
+| `backchannel N received`, N rising | Home Assistant's voice really reaches the device |
+| `mic max/60s` between −30 and −6 dBFS | the microphone captures at a usable level |
+| `spk` moving while someone talks | sound is actually coming out |
+| **`offered == accepted`, `0 short writes`** | nothing is lost between decoding and the speaker |
 
-La dernière est la plus importante et la moins évidente : un écart entre
-`offered` et `accepted` ne se voit ni ne s'entend comme une perte, il s'entend
-comme *rien du tout*.
+The last one is the most important and the least obvious: a gap between
+`offered` and `accepted` does not sound like reduced quality, it sounds like
+*nothing at all*.
 
-Les réglages qui amènent là, sur une carte à codec ES8311/ES7210 :
+## Answering "is the microphone working?"
 
-```yaml
-rtsp_server:
-  backchannel: always     # sans ça, aucun bouton « parler » n'apparaît
-  audio:
-    microphone_id: board_microphone
-    speaker_id: board_speaker
-    gain: 8.0             # +18 dB ; le codec seul arrivait à -58 dBFS
-    volume: 0.8
-    half_duplex: true
-```
+This is the hardest fault to place in the chain, because every stage between the
+capsule and the browser can swallow the sound in silence. The component measures
+at the two points that matter — just after capture and just before playback — so
+the device answers on its own, with no go2rtc and no browser involved.
 
-## « Je ne sais pas si le micro et l'audio fonctionnent »
+### The two tests, in this order
 
-C'est la panne la plus difficile à situer de toute la chaîne : entre la capsule
-et le navigateur, chaque étage peut avaler le son sans rien dire. Le composant
-mesure donc aux deux points qui comptent — juste après la capture, juste avant la
-restitution — et l'appareil répond tout seul, sans go2rtc ni navigateur.
+1. **Test beep** (`rtsp_server.play_test_tone`) — proves the speaker alone. No
+   beep means the fault is the output: amplifier off, no `speaker_id`, volume at
+   zero. Look no further.
+2. **Local loopback** (`rtsp_server.set_loopback`) — speak in front of the
+   doorbell and you should hear yourself. If you do, capture, gain, G.711
+   companding and playback are all sound, and whatever remains is in the
+   network, in go2rtc or in Home Assistant.
 
-### Les deux tests, dans cet ordre
+Both are wired into every example config, as Home Assistant entities *and* as
+on-screen buttons where there is a screen.
 
-1. **Bip de test** (`rtsp_server.play_test_tone`) — prouve le haut-parleur seul.
-   Pas de bip ⇒ inutile de chercher plus loin : ampli coupé, `speaker_id`
-   absent, volume à zéro.
-2. **Boucle locale** (`rtsp_server.set_loopback`) — parlez devant la sonnette,
-   vous devez vous entendre. Si oui, la capture, le gain, la compression G.711 et
-   la restitution sont tous bons, et ce qui reste est dans le réseau, go2rtc ou
-   Home Assistant.
+> The loopback **times out after two minutes, by design**. Microphone and
+> speaker share a board: at any useful gain the loop becomes acoustic and runs
+> away into a howl, and while it runs it holds the speaker against the real
+> backchannel. There is no reason to leave it on.
 
-Les deux sont câblés dans `doorbell.yaml` et `doorbell-lvgl.yaml`, en entités
-Home Assistant *et* en boutons sur l'écran du P4.
+### Readings
 
-### Les mesures
-
-| Depuis une lambda | Ce que ça dit |
+| From a lambda | What it tells you |
 |---|---|
-| `mic_level_db()` | niveau crête du micro, en dBFS, gain appliqué |
-| `mic_level()` | le même, en 0.0 – 1.0 |
-| `mic_alive()` | la source micro délivre-t-elle encore des échantillons ? |
-| `mic_samples()` | échantillons lus depuis le démarrage |
-| `speaker_level_db()` / `speaker_level()` | niveau de ce qui part au haut-parleur |
-| `audio_packets_sent()` | paquets RTP montants (micro → réseau) |
-| `audio_packets_received()` | paquets backchannel reçus (Home Assistant → P4) |
-| `audio_running()` / `has_speaker()` | l'état du pipeline |
+| `mic_peak_hold_db()` | loudest microphone level of the last minute, in dBFS |
+| `mic_level_db()` | instantaneous level; decays in a second |
+| `mic_alive()` | is the microphone source still delivering samples? |
+| `speaker_peak_hold_db()` | the same, for what the speaker accepted |
+| `speaker_bytes_offered()` / `speaker_bytes_written()` | offered versus accepted |
+| `speaker_healthy()` | false when the speaker refuses or truncates |
+| `audio_packets_sent()` / `audio_packets_received()` | RTP up / backchannel down |
 
-Comment lire `mic_level_db()` :
+Use `mic_peak_hold_db()` for a Home Assistant sensor, never `mic_level_db()`: a
+level that decays in a second is unreadable at any polling interval a sensor can
+use, and reports room tone rather than speech.
 
-| Lecture | Diagnostic |
+How to read the microphone level:
+
+| Reading | Diagnosis |
 |---|---|
-| `mic_alive()` faux | la source ne délivre **rien** : mauvais `microphone_id`, codec non démarré, broches I2S fausses. Aucun réglage de gain n'y fera rien. |
-| −100 dBFS en parlant | la source délivre du **silence numérique** : mauvais slot I2S (`channel:`), capsule morte, gain à zéro. |
-| −60 à −40 dBFS | ça capte, mais faiblement — montez le gain (`gain:`, ou `mic_gain_db` côté fdaudio). |
-| −30 à −6 dBFS | niveau de parole correct. |
-| au-dessus de −3 dBFS | ça écrête : baissez le gain. |
-| `audio_packets_received()` figé à 0 pendant que vous parlez depuis Home Assistant | la voix descendante n'atteint pas le P4 : le défaut est en amont (backchannel non négocié, go2rtc), pas dans le composant. |
+| `mic_alive()` false | the source delivers **nothing**: wrong `microphone_id`, codec not started, wrong I2S pins. No amount of gain will help |
+| −100 dBFS while speaking | the source delivers **digital silence**: wrong I2S slot (`channel:`), dead capsule, gain at zero |
+| −60 to −40 dBFS | it hears, but faintly — raise the gain (the codec's own first, then `gain:`) |
+| −30 to −6 dBFS | a healthy speech level |
+| above −3 dBFS | clipping: lower the gain |
+| `audio_packets_received()` stuck at 0 while you press talk | the downstream voice never reaches the device; the fault is upstream, not here |
 
-Les mêmes chiffres apparaissent dans le résumé périodique des logs, avec un
-vumètre en texte :
+## Getting the doorbell press into Home Assistant
 
-```
-[rtsp_server]: --- status ---------------------------------------
-[rtsp_server]:   clients=1 playing=1 | negotiated: video=yes audio=yes backchannel=yes
-[rtsp_server]:   video: 812 encoded, 0 skipped | tx: 0 packets, 0 frames dropped
-[rtsp_server]:   audio: mic 1620 packets sent | backchannel 0 received, 0 dropped
-[rtsp_server]:   mic:   259200 samples read (flowing), peak -21.4 dBFS [######----]
-[rtsp_server]:   spk:   peak -100.0 dBFS [----------]
-[rtsp_server]: --------------------------------------------------
-```
+The ring has nothing to do with the RTSP stream — it is ordinary ESPHome, and
+that is exactly where it goes wrong. A `binary_sensor` on its own is not enough:
 
-## « J'appuie sur Sonner et rien n'arrive dans Home Assistant »
+- **no card reacts to a `binary_sensor`.** A camera card shows a camera, full
+  stop. Surfacing the ring takes an automation;
+- **without a `device_class`, Home Assistant cannot tell** it is a doorbell;
+- **a short pulse gets missed.** If the API was disconnected at that instant,
+  the information is gone.
 
-La sonnerie n'a rien à voir avec le flux RTSP : c'est de l'ESPHome ordinaire, et
-c'est justement là que ça coince. Un `binary_sensor` seul ne suffit pas —
+The example configs therefore expose three paths. The first is enough in almost
+every case:
 
-- **aucune carte ne réagit à un `binary_sensor`.** La carte caméra affiche une
-  caméra, un point. Faire apparaître la sonnerie demande une automatisation ;
-- **sans `device_class`, Home Assistant ne devine pas** qu'il s'agit d'une
-  sonnette ;
-- **une impulsion courte se rate.** Si l'API était déconnectée à cet instant,
-  l'information est perdue.
-
-Les configurations d'exemple exposent donc trois chemins, du plus utile au plus
-brut. Le premier suffit presque toujours :
-
-| Chemin | Entité / évènement | À utiliser pour |
+| Path | Entity / event | Use it for |
 |---|---|---|
-| **`event`** | `event.<appareil>_sonnette`, `device_class: doorbell` | c'est **l'entité sonnette native de Home Assistant**. Son état est l'horodatage du dernier appui, elle se choisit directement comme déclencheur dans l'éditeur d'automatisations, et rien n'est perdu. |
-| `binary_sensor` | `binary_sensor.<appareil>_bouton`, `device_class: occupancy` | les conditions et les cartes qui veulent un on/off. Tenu 5 s pour être visible à l'œil dans Outils de développement → États. |
-| évènement de bus | `esphome.doorbell_pressed` | les automatisations écrites à la main en YAML. |
+| **`event`** | `event.<device>_sonnette`, `device_class: doorbell` | Home Assistant's **native doorbell entity**. Its state is the timestamp of the last press, it can be picked straight out of the automation editor, and nothing is lost |
+| `binary_sensor` | `binary_sensor.<device>_bouton`, `device_class: occupancy` | conditions and cards that want an on/off. Held for 5 s so it is visible in Developer Tools → States |
+| bus event | `esphome.doorbell_pressed` | automations written by hand in YAML |
 
-**Mais publier l'appui ne le fait pas sonner.** Home Assistant ne sonne pas tout
-seul : tant qu'aucune automatisation n'écoute ces entités pour en faire du bruit,
-l'appui ne fait que changer une valeur dans une base de données. Le carillon sur
-une enceinte et la notification avec vignette sont dans
-[`docs/home-assistant.md`](docs/home-assistant.md) §6 ; le parcours complet
-« on appuie → ça sonne → je vois → je réponds » est décrit au §5 bis.
+**Publishing the press does not make anything ring.** Home Assistant does not
+chime on its own: until an automation listens to these entities and makes a
+noise, the press only changes a value in a database. The chime and notification
+automation is in [`docs/home-assistant.md`](docs/home-assistant.md).
 
-Si rien ne part du tout, le premier point à trancher est *l'appui lui-même* : le
-script de sonnerie journalise `ring: sequence declenchee`. Cette ligne absente
-de `esphome logs` quand vous touchez le bouton signifie que l'appui tactile
-n'atteint pas le widget (calibration ou rotation du GT911), et non que la
-sonnerie échoue.
+If nothing leaves the device at all, settle the press itself first: the ring
+script logs `ring: sequence declenchee`. That line missing from `esphome logs`
+when you press the button means the press never reached the script — on a touch
+screen, a calibration or rotation problem — not that the ring failed.
 
-## Résolution de l'image
+## Why MJPEG only
 
-Le contrôleur MIPI-CSI de l'ESP32-P4 **ne redimensionne pas** : la résolution
-vient du format sélectionné dans le capteur au moment de l'initialisation. En
-source V4L2 directe, le composant lit ce format avec `VIDIOC_G_FMT` et
-configure l'encodeur en conséquence — il n'y a rien à déclarer côté
-`rtsp_server`. Avec `camera_id`, c'est la clé `resolution:` du composant
-`esp_cam_sensor` qui décide.
+The ESP32-P4 does have a hardware H.264 encoder, and an earlier version of this
+component exposed it. It was removed, for two reasons that cannot be worked
+around from inside this component:
 
-Formats OV5647 disponibles dans `esphome_esp-video`, sélectionnés par
-`CONFIG_CAMERA_OV5647_MIPI_IF_FORMAT_INDEX_DEFAULT` :
+- **the P4 cannot decode H.264.** What it encodes, it cannot display again: the
+  local LVGL preview was impossible in that mode (it would take a software
+  decoder such as [edge264](https://github.com/tvlabs/edge264));
+- **the two formats are incompatible within one camera stream.** The H.264
+  encoder consumes YUV420, LVGL displays RGB565. A single camera could not feed
+  both — you had to choose between the screen and the stream.
 
-| Index | Résolution | Format | |
+MJPEG keeps one RGB565 frame feeding the screen *and* the network, with no
+awkward alignment constraint and no waiting for a key frame. The price is
+bitrate (~6–10 Mbit/s at 800×640 @ 15 fps), and the fact that WebRTC cannot
+carry MJPEG: go2rtc will run ffmpeg to convert it. MSE, MJPEG and thumbnails go
+through untouched.
+
+Audio, by contrast, crosses the whole chain **without transcoding** in either
+direction: browsers encode and decode PCMU/PCMA natively.
+
+## Image resolution
+
+The ESP32-P4's MIPI-CSI controller **does not rescale**: the resolution comes
+from the format selected in the sensor at init time. With a direct V4L2 source
+the component reads it back with `VIDIOC_G_FMT` and configures the encoder
+accordingly — there is nothing to declare on `rtsp_server`. With `camera_id`,
+the `resolution:` key of `esp_cam_sensor` decides.
+
+OV5647 formats available in `esphome_esp-video`, selected by
+`CONFIG_CAMERA_OV5647_MIPI_IF_FORMAT_INDEX_DEFAULT`:
+
+| Index | Resolution | Format | |
 |---|---|---|---|
-| 0 | 800×1280 @ 50 fps | RAW8 | portrait — plutôt adapté à une sonnette |
-| 1 | 800×640 @ 50 fps | RAW8 | celui de `doorbell-lvgl.yaml` |
+| 0 | 800×1280 @ 50 fps | RAW8 | portrait — a good fit for a doorbell |
+| 1 | 800×640 @ 50 fps | RAW8 | what the example configs use |
 | 2 | 800×800 @ 50 fps | RAW8 | |
-| 3 | 1920×1080 @ 30 fps | RAW10 | lourd pour le débit MJPEG |
-| 4 | 1280×960 @ 45 fps | RAW10 | recommandé en paysage |
+| 3 | 1920×1080 @ 30 fps | RAW10 | heavy for the MJPEG bitrate |
+| 4 | 1280×960 @ 45 fps | RAW10 | recommended in landscape |
 
-RFC 2435 impose des multiples de 8 et au plus 2040 px par côté. Le composant
-vérifie ces conditions à l'ouverture et refuse de démarrer avec un message
-explicite plutôt que de produire un flux illisible.
+RFC 2435 requires multiples of 8 and at most 2040 px per side. The component
+checks this when opening the device and refuses to start with an explicit
+message rather than producing an undecodable stream.
 
-## Limites connues
+## Known limitations
 
-- **TCP uniquement.** Le transport UDP (`RTP/AVP;unicast`) n'est pas implémenté :
-  un `SETUP` en UDP reçoit un `461 Unsupported Transport`. C'est le mode par
-  défaut de go2rtc ; pour VLC il faut forcer le TCP (`--rtsp-tcp`).
-- **Pas d'annulation d'écho.** Le mode half duplex remplace l'AEC ; voir la
-  section acoustique de [`docs/hardware.md`](docs/hardware.md).
-- **Un seul backchannel actif.** Ne demandez pas le backchannel depuis deux
-  sources go2rtc simultanément (voir les commentaires de `go2rtc.yaml`).
-- **Pas de RTCP.** Les paquets RTCP reçus sont ignorés ; aucun rapport n'est
-  émis. Ni go2rtc ni ffmpeg n'en ont besoin ici.
-- **MJPEG et WebRTC.** WebRTC ne transporte pas de MJPEG : go2rtc lancera ffmpeg
-  pour transcoder. Les modes MSE, MJPEG et les vignettes fonctionnent en direct.
-- **Pas de H.264.** Voir plus haut : le P4 ne le décode pas, et son encodeur ne
-  peut pas partager la caméra avec l'aperçu LVGL.
-- **Un seul consommateur de la caméra.** Une seule tâche a le droit de dépiler
-  les tampons V4L2. Avec `drive_camera: false`, c'est `lvgl_camera_display` ;
-  si vous éteignez l'aperçu, rendez la main au serveur avec
-  `id(...).set_drive_camera(true)`, sinon le flux se fige sans erreur (c'est ce
-  que fait l'interrupteur d'aperçu de `doorbell-lvgl.yaml`).
+- **TCP only.** UDP transport (`RTP/AVP;unicast`) is not implemented: a UDP
+  `SETUP` gets `461 Unsupported Transport`. That is go2rtc's default anyway; VLC
+  needs `--rtsp-tcp`.
+- **No echo cancellation.** Half duplex replaces AEC; see the acoustics section
+  of [`docs/hardware.md`](docs/hardware.md).
+- **One active backchannel.** Do not request the backchannel from two go2rtc
+  sources at once (see the comments in `go2rtc.yaml`).
+- **No RTCP.** Incoming RTCP is ignored and none is emitted. Neither go2rtc nor
+  ffmpeg needs it here.
+- **MJPEG and WebRTC.** WebRTC cannot carry MJPEG, so go2rtc runs ffmpeg to
+  transcode. This costs CPU on the Home Assistant machine and, because the
+  transcode and the backchannel end up as two separate sources, it is what
+  blocks the microphone button in the Advanced Camera Card — see
+  [`docs/home-assistant.md`](docs/home-assistant.md).
+- **No H.264.** See above.
+- **One camera consumer.** Only one task may dequeue V4L2 buffers. With
+  `drive_camera: false` that is `lvgl_camera_display`; if you turn the preview
+  off, hand the dequeue back with `set_drive_camera(true)` or the stream freezes
+  with no error anywhere. The preview switch in `doorbell-lvgl.yaml` does this.
 
-## Détails d'implémentation
+## Implementation notes
 
-- **Zéro copie.** Le tampon de la caméra (PSRAM compatible DMA) est donné tel
-  quel à `jpeg_encoder_process` ; seul le flux compressé est relu.
-- **Un seul thread réseau.** Un unique tâche FreeRTOS possède la socket
-  d'écoute, toutes les sessions et l'envoi : aucun verrou sur le chemin critique.
-  Les tâches vidéo et audio déposent leurs paquets RTP dans un tampon circulaire
-  et ne bloquent jamais sur le réseau — en cas de saturation, les paquets sont
-  abandonnés plutôt que de figer l'encodage.
-- **MJPEG (RFC 2435).** Les en-têtes JFIF ne sont pas transmis : le récepteur
-  les reconstruit depuis l'en-tête RTP de 8 octets, et les tables de
-  quantification voyagent en intrabande dans le premier paquet de chaque trame
-  (`Q = 255`). Le sous-échantillonnage est déduit du marqueur SOF.
-- **Backchannel.** La piste `sendonly` n'est annoncée que si le client envoie
-  `Require: www.onvif.org/ver20/backchannel` — un client ordinaire (VLC, ffmpeg)
-  voit un flux à deux pistes parfaitement normal.
+- **Zero copy.** The camera buffer (DMA-capable PSRAM) is handed to
+  `jpeg_encoder_process` as is; only the compressed stream is read back.
+- **One network thread.** A single FreeRTOS task owns the listening socket, all
+  sessions and transmission: no lock on the critical path. The video and audio
+  tasks drop their RTP packets into a ring buffer and never block on the
+  network — under saturation, packets are dropped rather than stalling the
+  encoder.
+- **Whole frames are dropped, never fragments.** A JPEG missing a fragment from
+  its middle is not a slightly worse picture: the decoder resynchronises on
+  whatever follows and paints parts of two frames at once. Truncating at the
+  overflow point and resuming cleanly on the next frame costs frames, not
+  coherence.
+- **MJPEG (RFC 2435).** JFIF headers are not transmitted: the receiver rebuilds
+  them from the 8-byte RTP header, and the quantization tables travel in band in
+  the first packet of every frame (`Q = 255`). Subsampling is derived from the
+  SOF marker.
+- **One writer on the speaker.** The test beep, the backchannel and the loopback
+  monitor share one real-time sink. Two tasks each pushing 20 ms every 20 ms
+  offer twice what it can take, so it accepts about half of each and the result
+  is silence. Priority is beep > far end > loopback.
+- **Short writes are retried.** `Speaker::play()` returns how many bytes it
+  accepted, which is not always all of them. The remainder is re-offered until
+  it is in or a 60 ms deadline expires — dropping it instead punches a hole in
+  every packet.
+
+## Tests
+
+Five harnesses, all runnable on a plain Linux host without ESP-IDF. See
+[`tests/README.md`](tests/README.md).
+
+```bash
+./tests/lint_cpp.sh
+python3 tests/check_esphome_api.py
+python3 tests/test_config_schema.py
+```
 
 ## Licence
 
-Voir [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

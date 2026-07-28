@@ -1,20 +1,20 @@
-# Architecture matérielle
+# Hardware
 
-## Vue d'ensemble
+## Overview
 
 ```
         ┌──────────────┐
         │   OV5647     │
         │  (MIPI CSI)  │
         └──────┬───────┘
-               │ 2 lanes MIPI (broches dédiées, hors matrice GPIO)
-               │ + I2C/SCCB pour la configuration du capteur
+               │ 2 MIPI lanes (dedicated pins, outside the GPIO matrix)
+               │ + I2C/SCCB to configure the sensor
         ┌──────▼─────────────────────────────────┐
         │             ESP32-P4                   │
         │                                        │
-        │  ISP  ──► YUV420 ──► encodeur H.264 HW │
-        │  I2S0 ◄── micro (INMP441)              │
-        │  I2S1 ──► ampli   (MAX98357A)          │
+        │  ISP  ──► RGB565 ──► HW JPEG encoder   │
+        │  I2S0 ◄── microphone (INMP441)         │
+        │  I2S1 ──► amplifier  (MAX98357A)       │
         └──────┬─────────────────────────────────┘
                │ SDIO
         ┌──────▼───────┐
@@ -26,68 +26,80 @@
         └──────────────┘
 ```
 
-## Contraintes GPIO de l'ESP32-P4
+Two hardware variants are described in this repository, and their audio wiring
+is **not** interchangeable:
 
-À vérifier **avant** de figer un brochage :
+| Config | Audio |
+|---|---|
+| `doorbell-lvgl.yaml`, `doorbell-p4-headless.yaml` | the P4 evboard's own codec: ES8311 out, ES7210 in, driven by `fdaudio` |
+| `doorbell.yaml` | INMP441 microphone and MAX98357A amplifier on raw I2S pins, no codec |
 
-| Broches | Usage | Peut-on s'en servir ? |
+This page documents the second, plus the constraints that apply to both.
+
+## ESP32-P4 GPIO constraints
+
+Check these **before** settling on a pinout:
+
+| Pins | Use | Usable? |
 |---|---|---|
-| MIPI CSI D0/D1/CLK | Interface caméra dédiée | Non, hors matrice GPIO |
-| GPIO24, GPIO25 | USB-Serial-JTAG par défaut | À éviter (perte du port de debug) |
-| GPIO34 – GPIO38 | Broches de strapping | À éviter (GPIO36 est souvent XCLK caméra) |
-| Bus SDIO vers l'ESP32-C6 | Wi-Fi | Non — dépend de la carte |
-| Flash / PSRAM | Mémoire | Non, broches dédiées |
+| MIPI CSI D0/D1/CLK | dedicated camera interface | No — outside the GPIO matrix |
+| GPIO24, GPIO25 | USB-Serial-JTAG by default | Avoid (you lose the debug port) |
+| GPIO34 – GPIO38 | strapping pins | Avoid (GPIO36 is often the camera XCLK) |
+| SDIO bus to the ESP32-C6 | Wi-Fi | No — board-dependent |
+| Flash / PSRAM | memory | No, dedicated pins |
 
-Le brochage SDIO vers le C6 **change d'une carte à l'autre** (P4-Function-EV-Board,
-Waveshare NANO, Waveshare WIFI6, M5Stack Tab5…). Reportez-vous au schéma de votre
-carte : c'est la seule source fiable. Si une broche est déjà prise, ESPHome ou le
-driver I2S échouera au démarrage avec une erreur explicite dans les logs.
+The SDIO pinout to the C6 **differs from board to board** (P4-Function-EV-Board,
+Waveshare NANO, Waveshare WIFI6, M5Stack Tab5…). Your board's schematic is the
+only reliable source. If a pin is already taken, ESPHome or the I2S driver fails
+at startup with an explicit error in the logs.
 
-## Brochage proposé
+## Suggested pinout
 
-Deux ports I2S séparés — c'est le montage le plus simple et le plus tolérant.
+Two separate I2S ports — the simplest and most forgiving arrangement.
 
-### Microphone I2S — INMP441 / ICS-43434 (I2S0)
+### I2S microphone — INMP441 / ICS-43434 (I2S0)
 
-| Signal | ESP32-P4 | Module | Remarque |
+| Signal | ESP32-P4 | Module | Note |
 |---|---|---|---|
-| BCLK | GPIO20 | SCK | horloge bit |
-| LRCLK / WS | GPIO21 | WS | horloge mot |
-| DIN | GPIO22 | SD | données micro → P4 |
-| — | GND | L/R | à la masse ⇒ slot **gauche** (`channel: left`) |
+| BCLK | GPIO20 | SCK | bit clock |
+| LRCLK / WS | GPIO21 | WS | word clock |
+| DIN | GPIO22 | SD | data microphone → P4 |
+| — | GND | L/R | tied to ground ⇒ **left** slot (`channel: left`) |
 | 3V3 | 3V3 | VDD | |
 | GND | GND | GND | |
 
-L'INMP441 sort du 24 bits cadré à gauche dans un slot de 32 bits : d'où
-`bits_per_sample: 32` dans la configuration. Le composant ne garde que les
-16 bits de poids fort.
+The INMP441 outputs 24 bits left-justified in a 32-bit slot, hence
+`bits_per_sample: 32` in the configuration. The component keeps only the top
+16 bits.
 
-### Haut-parleur — MAX98357A (I2S1)
+### Speaker — MAX98357A (I2S1)
 
-| Signal | ESP32-P4 | Module | Remarque |
+| Signal | ESP32-P4 | Module | Note |
 |---|---|---|---|
 | BCLK | GPIO23 | BCLK | |
 | LRCLK / WS | GPIO26 | LRC | |
-| DOUT | GPIO27 | DIN | données P4 → ampli |
-| SD (shutdown) | GPIO28 | SD | **recommandé** — voir plus bas |
-| 5V | 5V | Vin | l'ampli tire des pointes de courant |
+| DOUT | GPIO27 | DIN | data P4 → amplifier |
+| SD (shutdown) | GPIO28 | SD | **recommended** — see below |
+| 5V | 5V | Vin | the amplifier draws current in bursts |
 | GND | GND | GND | |
 
-La broche `GAIN` du MAX98357A laissée en l'air donne 9 dB, ce qui convient à un
-haut-parleur 4 Ω / 3 W de sonnette. Reliez-la à GND pour 12 dB si le niveau est
-trop faible.
+The MAX98357A's `GAIN` pin left floating gives 9 dB, which suits a 4 Ω / 3 W
+doorbell speaker. Tie it to GND for 12 dB if the level is too low.
 
-### Sonnerie et carillon
+### Button, chime and indicator
 
-| Signal | ESP32-P4 | Remarque |
+| Signal | ESP32-P4 | Note |
 |---|---|---|
-| Bouton | GPIO32 | `INPUT_PULLUP`, contact vers GND |
-| Relais carillon | GPIO33 | via transistor/optocoupleur, jamais en direct |
-| LED d'état | GPIO45 | |
+| Button | GPIO32 | `INPUT_PULLUP`, contact to GND |
+| Chime relay | GPIO33 | through a transistor or optocoupler, never directly |
+| Status LED | GPIO45 | |
 
-## Variante « économie de broches » : un seul port I2S en full duplex
+> On a board with a screen, GPIO32 and GPIO33 are often already the backlight
+> and the display reset. Check before reusing them.
 
-Le micro et l'ampli partagent BCLK et LRCLK, sur deux slots différents :
+## Pin-saving variant: one I2S port in full duplex
+
+The microphone and amplifier share BCLK and LRCLK, on two different slots:
 
 ```yaml
 audio:
@@ -97,50 +109,51 @@ audio:
     lrclk_pin: GPIO21
     din_pin: GPIO22
     bits_per_sample: 32
-    channel: left      # L/R du micro à GND
+    channel: left      # microphone L/R to GND
   speaker:
-    i2s_port: 0        # même port que le micro -> full duplex
-    bclk_pin: GPIO20   # ignoré, les horloges du micro sont réutilisées
+    i2s_port: 0        # same port as the microphone -> full duplex
+    bclk_pin: GPIO20   # ignored, the microphone's clocks are reused
     lrclk_pin: GPIO21
     dout_pin: GPIO27
-    bits_per_sample: 32  # doit être identique à celui du micro
-    channel: right     # SD du MAX98357A à VDD -> slot droit
+    bits_per_sample: 32  # must match the microphone
+    channel: right     # MAX98357A SD to VDD -> right slot
 ```
 
-Trois broches économisées. En contrepartie les deux sens partagent la même
-horloge et la même largeur de slot ; le composant refuse la configuration à la
-compilation si ce n'est pas cohérent.
+Three pins saved. In exchange both directions share one clock and one slot
+width; the component rejects an inconsistent configuration at compile time.
 
-## Acoustique : le point qui fait ou défait l'audio bidirectionnel
+## Acoustics: what makes or breaks two-way audio
 
-L'ESP32-P4 n'exécute **pas** d'annulation d'écho acoustique (AEC) dans ce
-composant. Sans précaution, le micro réentend le haut-parleur et le correspondant
-s'entend lui-même, voire déclenche un larsen. Trois mesures, par ordre
-d'efficacité :
+This component runs **no acoustic echo cancellation**. Without care the
+microphone hears the speaker, the far end hears itself, and it can howl. Three
+measures, most effective first:
 
-1. **Half duplex (activé par défaut).** `half_duplex: true` coupe le micro tant
-   que de l'audio arrive du backchannel, et le rétablit `talk_timeout` après le
-   dernier paquet. C'est le comportement naturel d'un bouton push-to-talk.
-2. **Coupure matérielle de l'ampli.** Câblez la broche `SD` du MAX98357A et
-   pilotez-la depuis `on_talk_start` / `on_talk_end` (voir `doorbell.yaml`).
-   L'ampli est physiquement muet au repos : plus de souffle, moins de
-   consommation.
-3. **Séparation physique.** Micro et haut-parleur aux deux extrémités du
-   boîtier, joint mousse autour de la capsule micro, et pas de chemin rigide
-   entre les deux. C'est ce qui rapporte le plus pour le moins d'effort.
+1. **Half duplex (on by default).** `half_duplex: true` mutes the microphone
+   while backchannel audio is arriving, and restores it `talk_timeout` after the
+   last packet. That is the natural behaviour of a push-to-talk button.
+2. **Cut the amplifier in hardware.** Wire the MAX98357A's `SD` pin and drive it
+   from `on_talk_start` / `on_talk_end` (see `doorbell.yaml`). The amplifier is
+   physically silent at rest: no hiss, less current.
+3. **Physical separation.** Microphone and speaker at opposite ends of the
+   enclosure, foam gasket around the microphone capsule, and no rigid path
+   between the two. This buys the most for the least effort.
 
-Si vous avez besoin de vrai full duplex, il faudra ajouter l'AFE d'`esp-sr`
-(AEC matériel) — hors périmètre de ce composant.
+If you need real full duplex you will have to add `esp-sr`'s AFE (hardware AEC)
+— outside the scope of this component.
 
-## Alimentation
+> The local loopback test (`rtsp_server.set_loopback`) closes this acoustic loop
+> on purpose. Expect it to howl at any useful gain; that is not a fault, and it
+> is why the monitor stops itself after two minutes.
 
-Le P4 avec la caméra MIPI, l'ISP, l'encodeur H.264 et le Wi-Fi via le C6
-consomme sensiblement plus qu'un ESP32 classique, avec des pointes lors des
-trames clés et des rafales Wi-Fi. Prévoyez :
+## Power supply
 
-- une alimentation 5 V / 2 A minimum ;
-- un condensateur de découplage de 470 µF à 1000 µF près du module ;
-- des fils courts vers l'ampli, qui appelle du courant en impulsions.
+The P4 with the MIPI camera, the ISP, the JPEG encoder and Wi-Fi through the C6
+draws noticeably more than a classic ESP32, with peaks on large frames and Wi-Fi
+bursts. Plan for:
 
-Une alimentation juste suffisante se manifeste par des redémarrages en plein
-flux ou par un `brownout` dans les logs — pas par une image dégradée.
+- a 5 V / 2 A supply, minimum;
+- a 470 µF to 1000 µF decoupling capacitor near the module;
+- short wires to the amplifier, which draws current in pulses.
+
+A marginal supply shows up as reboots mid-stream or a `brownout` in the logs —
+not as a degraded picture.

@@ -109,7 +109,7 @@ external_components:
     refresh: 0s
 
 ## ===========================================================================
-##  Bus, audio, caméra
+##  Buses, audio, camera
 ## ===========================================================================
 
 i2c:
@@ -122,7 +122,7 @@ esp_ldo:
   - voltage: 2.5V
     channel: 3
 
-# Codec de la carte : ES8311 en sortie, ES7210 en entrée.
+# The board's codec: ES8311 out, ES7210 in.
 fdaudio:
   id: audio_engine
   lrclk_pin: GPIO10
@@ -268,7 +268,7 @@ script:
       - switch.turn_off: chime_relay
 
 button:
-  # Déclenche la même séquence que l'appui, depuis Home Assistant.
+  # Runs the same sequence as a press, from Home Assistant.
   - platform: template
     name: "Sonner"
     icon: mdi:bell-ring
