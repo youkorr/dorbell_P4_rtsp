@@ -176,11 +176,15 @@ void AudioPipeline::account_write_(const int16_t *src, size_t offered_bytes, siz
   if (written_bytes < offered_bytes) {
     this->speaker_drops_++;
     if ((this->speaker_drops_ % 50) == 1) {
-      ESP_LOGW(TAG,
-               "the speaker accepted %u of %u bytes. It is not keeping up, or it is not running: "
-               "%" PRIu32 " short writes so far.",
+      // Naming the likely cause matters here: an unqualified "not keeping up"
+      // reads as a hardware fault, and sends you looking at the amplifier and
+      // the wiring when the answer is that something else is holding the sink.
+      const char *hint = this->loopback_
+                             ? "  <-- the loopback monitor is on; turn it off, it competes for the speaker"
+                             : "";
+      ESP_LOGW(TAG, "the speaker accepted %u of %u bytes (%" PRIu32 " short writes so far)%s",
                static_cast<unsigned>(written_bytes), static_cast<unsigned>(offered_bytes),
-               this->speaker_drops_);
+               this->speaker_drops_, hint);
     }
   }
 
@@ -628,7 +632,18 @@ void AudioPipeline::capture_run_() {
     this->update_hold_(&this->mic_hold_, &this->mic_hold_since_us_,
                        update_peak_(&this->mic_peak_, &this->mic_peak_us_, narrowband.data(), out_count));
 
-    if (this->loopback_) {
+    // The speaker has exactly ONE writer at a time, and this is where that is
+    // enforced. It is a real-time sink: two tasks each pushing 20 ms every 20 ms
+    // offer twice what it can take, so it accepts about half of each and the
+    // result is silence or mush -- with every counter looking like a hardware
+    // fault. The playback task already stood aside for the loopback; this is the
+    // other half of that bargain, which was missing.
+    //
+    // Priority, highest first: the test beep (a deliberate action, it must be
+    // heard), then the far end talking (the actual purpose of the device), then
+    // the loopback monitor (a bench aid, and the only one that can wait).
+    const bool speaker_taken = this->tone_remaining_ > 0 || this->is_talking();
+    if (this->loopback_ && !speaker_taken) {
       // Back up to the sink's rate before writing, or the monitor plays an
       // octave low and twice as slow. Sample-and-hold is enough here: the
       // signal really is band-limited to 4 kHz at this point, and holding each
@@ -638,6 +653,9 @@ void AudioPipeline::capture_run_() {
         for (uint32_t d = 0; d < decimation; d++)
           pcm[n++] = narrowband[i];
       this->write_pcm_(pcm.data(), n);
+    } else if (this->loopback_ && speaker_taken && !this->loopback_yield_logged_) {
+      ESP_LOGI(TAG, "loopback monitor paused: the speaker is busy with the beep or with incoming audio");
+      this->loopback_yield_logged_ = true;
     }
 
     if (this->callback_) {

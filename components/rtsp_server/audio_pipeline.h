@@ -251,6 +251,7 @@ class AudioPipeline {
   volatile uint32_t speaker_bytes_written_{0};
   volatile uint32_t speaker_drops_{0};
   bool speaker_restart_logged_{false};
+  bool loopback_yield_logged_{false};
 
   volatile bool loopback_{false};
   /// Remaining samples of the pending beep, and its phase state.
