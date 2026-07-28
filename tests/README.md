@@ -1,10 +1,11 @@
 # Tests
 
-Five harnesses, all runnable on a plain Linux host without ESP-IDF.
+Six harnesses, all runnable on a plain Linux host without ESP-IDF.
 
 | | What it proves |
 |---|---|
 | `lint_cpp.sh` | the C++ is internally consistent, compiles, and the actions instantiate |
+| `check_example_configs.sh` | ESPHome itself accepts every example YAML in the repository root |
 | `check_esphome_api.py` | our stubs and codegen still match the installed ESPHome |
 | `test_config_schema.py` | the ESPHome schema and codegen behave |
 | `test_rtp.cpp` | G.711 packetizer and companding |
@@ -18,6 +19,9 @@ python3 tests/test_config_schema.py
 
 python3 tests/check_esphome_api.py
 
+pip install esphome            # the real thing, not --no-deps
+./tests/check_example_configs.sh
+
 g++ -std=gnu++17 -fsanitize=address,undefined -I components/rtsp_server \
     -o /tmp/test_rtp tests/test_rtp.cpp components/rtsp_server/rtp.cpp && /tmp/test_rtp
 
@@ -26,6 +30,30 @@ python3 tests/make_jpeg_fixtures.py /tmp/fx
 g++ -std=gnu++17 -fsanitize=address,undefined -I components/rtsp_server \
     -o /tmp/test_mjpeg tests/test_mjpeg.cpp components/rtsp_server/rtp.cpp && /tmp/test_mjpeg /tmp/fx
 ```
+
+## Why `check_example_configs.sh` exists
+
+`lint_cpp.sh` checks the example YAML the only ways a shell script can: it parses
+it, resolves every `id(...).method()` in a lambda against the real headers, and
+looks for a GPIO claimed twice. That is worth having, but it is our reading of
+ESPHome's rules, and the first run of the real validator found three fatal bugs
+it could not see:
+
+  * `id: status_led` on a `status_led` light. An id may not be an integration
+    name; ESPHome rejects the entire config.
+  * `version: 5.4.0` pinned under `framework:`, below what the `i2c` component
+    now requires. It was valid when written — a pinned version rots on its own.
+  * a `wifi:` block with no `esp32_hosted:`. The P4 has no radio; ESPHome refuses
+    the combination.
+
+The script substitutes this working tree for the `dorbell_P4_rtsp` external
+component, so it validates what you are about to commit. Every other source keeps
+the git ref its YAML declares and is fetched, so **it needs network**.
+
+A file is reported `SKIP` when a component from another repository fails to
+import — ESPHome surfaces a swallowed `ImportError` as "Component not found",
+so an absent `aioesphomeapi` or `freetype-py` is indistinguishable from a broken
+config. Install those to actually check `doorbell-lvgl.yaml`.
 
 ## What none of them prove
 

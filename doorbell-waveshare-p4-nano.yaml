@@ -1,18 +1,50 @@
+# ESP32-P4 doorbell — Waveshare ESP32-P4-NANO, no screen.
+#
+# The NANO is pin-identical to the ESP32-P4 function evboard for everything this
+# project touches: I2S audio on GPIO9-13, I2C on GPIO7/8, the SDIO link to the
+# ESP32-C6, and the amplifier enable on GPIO53. Exactly ONE thing differs, and
+# it is the one that breaks the audio:
+#
+#   THE NANO HAS NO ES7210.
+#
+# Its onboard MEMS microphone (MIC_P/MIC_N) is wired straight into the ES8311's
+# own ADC. An I2C bus scan on this board shows:
+#
+#   Found device at address 0x18     <- ES8311 codec
+#   Found device at address 0x36     <- camera sensor
+#                                    <- nothing at 0x40, no ES7210
+#
+# `fdaudio` looks for an ES7210 at 0x40 by default and fails when it is absent
+# -- and that failure happens after the output device is created, so it takes
+# the SPEAKER down with the microphone and the board produces no audio at all.
+# `mic_source: output_codec` below is what avoids that.
+#
+# The pin numbers here come from the NANO's published pinout, not from a board
+# in hand. If something does not come up, the schematic is the arbiter: audio on
+# GPIO9-13, SDIO to the C6 on GPIO14-19 + GPIO54, amplifier enable on GPIO53.
 
 substitutions:
-  name: doorbell-p4
-  friendly_name: Sonnette
+  name: doorbell-p4-nano
+  friendly_name: Doorbell
 
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
 
+# Do NOT copy `board: esp32-p4-evboard` from the evboard configs in this repo.
+# ESPHome has no entry for the NANO, and that one is flagged `engineering_sample`
+# in ESPHome's board table, which forces CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y and
+# a pre-rev.300 linker script. NANOs sold today carry production silicon.
+# Declaring the variant instead lets ESPHome pick `esp32-p4_r3-evboard`, the
+# rev.300 target.
+#
+# Check the boot log: "chip revision: vX.Y". Below v3.0 -> set
+# `engineering_sample: true`. v3.0 or above -> leave it false, as here.
 esp32:
   flash_size: 16MB
   variant: ESP32P4
-  board: esp32-p4-evboard
+  engineering_sample: false
   cpu_frequency: 360MHz
-  engineering_sample: true
   framework:
     type: esp-idf
     advanced:
@@ -30,7 +62,6 @@ esp32:
       CONFIG_SPIRAM_SPEED: "200"
       CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
       CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
-      # Le serveur RTSP pousse le RTP directement dans lwIP.
       CONFIG_LWIP_MAX_SOCKETS: "16"
       CONFIG_LWIP_SO_RCVBUF: "y"
       CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
@@ -51,7 +82,8 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-
+# The P4 has no radio: Wi-Fi comes from the ESP32-C6 over SDIO. These pins are
+# the same on the NANO as on the evboard.
 esp32_hosted:
   variant: ESP32C6
   reset_pin: GPIO54
@@ -64,7 +96,6 @@ esp32_hosted:
   active_high: true
   use_psram: true
   slot: 1
-
 
 psram:
   mode: hex
@@ -87,7 +118,8 @@ update:
     source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
     name: C6 Firmware
 
-
+# `refresh: 0s` on every block: ESPHome otherwise caches a git component for a
+# whole day, keyed on the branch NAME rather than the commit.
 external_components:
   - source:
       type: git
@@ -103,8 +135,9 @@ external_components:
     refresh: 0s
   - source:
       type: git
+      # `mic_source` lives on this branch. Point it at `main` once it is merged.
       url: https://github.com/youkorr/face-toface
-      ref: claude/mit-license-face-to-face-p9fc6m
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [fdaudio]
     refresh: 0s
 
@@ -112,19 +145,25 @@ external_components:
 ##  Buses, audio, camera
 ## ===========================================================================
 
+# I2C on GPIO7/8 carries both the ES8311 (0x18) and the camera sensor (0x36).
+# `scan: true` is set on purpose: the bus scan printed at boot is the fastest way
+# to see what the board actually has, and it is what tells you whether the
+# `mic_source` below is the right one. Expect 0x18 and 0x36, and NO 0x40.
 i2c:
   - id: bsp_bus
     sda: GPIO07
     scl: GPIO08
     frequency: 400kHz
+    scan: true
 
 esp_ldo:
   - voltage: 2.5V
     channel: 3
 
-# The board's codec: ES8311 out, ES7210 in.
 fdaudio:
   id: audio_engine
+  # I2S pins, identical to the evboard. Names are from the P4's point of view:
+  # din = what the P4 receives (the ES8311's ASDOUT), dout = what it sends.
   lrclk_pin: GPIO10
   bclk_pin: GPIO12
   mclk_pin: GPIO13
@@ -133,7 +172,15 @@ fdaudio:
   i2c_port: 0
   output_codec: es8311
   output_address: 0x18
-  mic_address: 0x40
+
+  # ---- THE ONE LINE THAT MATTERS ON THIS BOARD ---------------------------
+  # Capture through the ES8311's own ADC instead of looking for an ES7210 at
+  # 0x40, which this board does not have. `mic_address` is unused in this mode.
+  mic_source: output_codec
+
+  # The ES8311's ADC gain, in dB (0 - 42). The doorbell measurement on the
+  # reference board showed the microphone arriving far too quiet, so start high
+  # and trim down: it is cheaper here, before the converter, than downstream.
   mic_gain_db: 30
   output_volume: 70
   sample_rate: 16000
@@ -154,6 +201,9 @@ speaker:
 
 esp_video:
   i2c_id: bsp_bus
+  # If the camera answers on I2C (0x36 in the scan) but never streams, this is
+  # the first thing to check against your camera module: some carry their own
+  # 24 MHz oscillator and want `xclk_pin: -1`.
   xclk_pin: GPIO36
   xclk_freq: 24000000
   enable_jpeg: true
@@ -171,7 +221,7 @@ esp_cam_sensor:
   rotation: 0
 
 ## ===========================================================================
-##  Serveur RTSP
+##  RTSP server
 ## ===========================================================================
 
 rtsp_server:
@@ -184,6 +234,9 @@ rtsp_server:
   backchannel: always
 
   video:
+    # Mandatory whenever `esp_cam_sensor:` is declared, or both components open
+    # /dev/video0 and fight over it. No screen here, so the server drives the
+    # dequeue itself (drive_camera defaults to true).
     camera_id: p4_cam
     framerate: 15
     jpeg_quality: 25
@@ -193,6 +246,8 @@ rtsp_server:
     sample_rate: 16000
     microphone_id: board_microphone
     speaker_id: board_speaker
+    # Digital gain after the codec. Watch `max/60s` in the logs and aim for
+    # -30..-6 dBFS while speaking in front of the doorbell.
     gain: 8.0
     volume: 0.8
     half_duplex: true
@@ -205,13 +260,13 @@ rtsp_server:
     - light.turn_off: status_light
 
 ## ===========================================================================
-##  Sonnerie — les trois chemins vers Home Assistant
+##  The ring
 ## ===========================================================================
 
 event:
   - platform: template
     id: doorbell_event
-    name: "Sonnette"
+    name: "Doorbell"
     device_class: doorbell
     event_types:
       - pressed
@@ -219,8 +274,10 @@ event:
 binary_sensor:
   - platform: gpio
     id: doorbell_button
-    name: "Bouton"
+    name: "Button"
     device_class: occupancy
+    # Pick a pin that is free on your wiring; nothing on the NANO claims this
+    # one, but check your own additions.
     pin:
       number: GPIO32
       mode:
@@ -233,19 +290,19 @@ binary_sensor:
     on_press:
       - script.execute: ring
 
-  # Diagnostic audio, lisible depuis Home Assistant.
   - platform: template
-    name: "Micro actif"
+    name: "Microphone alive"
     device_class: problem
     entity_category: diagnostic
+    # Inverted on purpose: ON means a problem -- the source delivers nothing.
     lambda: 'return !id(doorbell_stream).mic_alive();'
   - platform: template
-    name: "Sortie audio en defaut"
+    name: "Audio output fault"
     device_class: problem
     entity_category: diagnostic
     lambda: 'return !id(doorbell_stream).speaker_healthy();'
   - platform: template
-    name: "On vous parle"
+    name: "Someone is talking"
     entity_category: diagnostic
     lambda: 'return id(doorbell_stream).is_talking();'
 
@@ -254,9 +311,8 @@ script:
     mode: restart
     then:
       - logger.log:
-          format: "ring: sequence declenchee"
+          format: "ring: sequence triggered"
           level: INFO
-      - switch.turn_on: chime_relay
       - event.trigger:
           id: doorbell_event
           event_type: pressed
@@ -264,19 +320,16 @@ script:
           event: esphome.doorbell_pressed
           data:
             device: ${name}
-      - delay: 1s
-      - switch.turn_off: chime_relay
 
 button:
-  # Runs the same sequence as a press, from Home Assistant.
   - platform: template
-    name: "Sonner"
+    name: "Ring"
     icon: mdi:bell-ring
     on_press:
       - script.execute: ring
 
   - platform: template
-    name: "Bip de test"
+    name: "Test beep"
     icon: mdi:volume-high
     entity_category: diagnostic
     on_press:
@@ -287,20 +340,18 @@ button:
           duration: 600ms
 
 switch:
-  - platform: gpio
-    id: chime_relay
-    name: "Carillon"
-    pin: GPIO33
-    restore_mode: ALWAYS_OFF
-
+  # NS4150B class-D amplifier enable (PA_CTRL). Same pin as the evboard.
   - platform: gpio
     id: audio_amplifier
-    name: "Amplificateur audio"
+    name: "Audio amplifier"
     pin: GPIO53
     restore_mode: ALWAYS_ON
 
+  # Speak and you should hear yourself. Stops itself after two minutes:
+  # microphone and speaker share the board, so the loop howls, and while it runs
+  # it competes with the real backchannel for the speaker.
   - platform: template
-    name: "Test audio (boucle micro vers haut-parleur)"
+    name: "Audio test (microphone to speaker loopback)"
     id: audio_loopback_switch
     icon: mdi:microphone-message
     entity_category: diagnostic
@@ -323,19 +374,21 @@ light:
 
 text_sensor:
   - platform: template
-    name: "Flux RTSP"
+    name: "RTSP stream"
     lambda: 'return {id(doorbell_stream).stream_url()};'
     update_interval: 60s
 
 sensor:
   - platform: template
-    name: "Clients RTSP"
+    name: "RTSP clients"
     lambda: 'return id(doorbell_stream).client_count();'
     update_interval: 10s
     accuracy_decimals: 0
 
+  # Rolling one-minute peak. The instantaneous level decays in a second and
+  # means nothing at a sensor's polling rate.
   - platform: template
-    name: "Niveau micro"
+    name: "Microphone level"
     unit_of_measurement: dBFS
     accuracy_decimals: 0
     device_class: sound_pressure
@@ -345,7 +398,7 @@ sensor:
     lambda: 'return id(doorbell_stream).mic_peak_hold_db();'
 
   - platform: template
-    name: "Niveau haut-parleur"
+    name: "Speaker level"
     unit_of_measurement: dBFS
     accuracy_decimals: 0
     device_class: sound_pressure
@@ -354,17 +407,20 @@ sensor:
     update_interval: 5s
     lambda: 'return id(doorbell_stream).speaker_peak_hold_db();'
 
+  # Stuck at 0 while talking from Home Assistant = the downstream voice never
+  # reaches the device; the fault is upstream.
   - platform: template
-    name: "Paquets audio recus"
+    name: "Audio packets received"
     accuracy_decimals: 0
     state_class: total_increasing
     entity_category: diagnostic
     update_interval: 5s
     lambda: 'return id(doorbell_stream).audio_packets_received();'
 
-
+  # These must stay equal. A gap does not sound like reduced quality, it sounds
+  # like nothing at all.
   - platform: template
-    name: "Octets audio proposes au HP"
+    name: "Audio bytes offered to speaker"
     accuracy_decimals: 0
     state_class: total_increasing
     entity_category: diagnostic
@@ -372,7 +428,7 @@ sensor:
     lambda: 'return id(doorbell_stream).speaker_bytes_offered();'
 
   - platform: template
-    name: "Octets audio acceptes par le HP"
+    name: "Audio bytes accepted by speaker"
     accuracy_decimals: 0
     state_class: total_increasing
     entity_category: diagnostic

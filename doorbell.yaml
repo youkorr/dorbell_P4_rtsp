@@ -20,11 +20,16 @@ esphome:
 
 esp32:
   variant: esp32p4
+  # Left to ESPHome on purpose: no `board:` (there is no entry for most P4
+  # boards, and `esp32-p4-evboard` silently selects a pre-rev.300 linker script)
+  # and no pinned IDF `version:`. The MIPI-CSI stack, the hardware JPEG encoder
+  # and the new I2S driver all need a recent IDF, and pinning one only rots --
+  # 5.4.0 is already below what the `i2c` component now requires.
+  #
+  # If the boot log reports a chip revision below v3.0, add
+  # `engineering_sample: true` here.
   framework:
     type: esp-idf
-    # The MIPI-CSI stack, the hardware JPEG encoder and the new I2S driver all
-    # need a recent IDF.
-    version: 5.4.0
     sdkconfig_options:
       # The camera and JPEG buffers live in PSRAM.
       CONFIG_SPIRAM: y
@@ -69,8 +74,23 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-# On an ESP32-P4 the radio lives in the ESP32-C6 companion; this is the usual
-# esp-hosted setup, adjust to your board.
+# The ESP32-P4 has no radio of its own: Wi-Fi comes from an ESP32-C6 companion
+# over SDIO, and ESPHome refuses a `wifi:` block on a P4 without this. These pins
+# are the P4 Function EV Board's and the Waveshare NANO's; they DIFFER from board
+# to board, so check your schematic. A wrong pin here means Wi-Fi never comes up.
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  use_psram: true
+  slot: 1
+
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
@@ -79,6 +99,16 @@ wifi:
     password: !secret fallback_password
 
 captive_portal:
+
+# The C6 needs matching esp-hosted firmware. This exposes it as an `update`
+# entity in Home Assistant instead of making you flash the C6 by hand.
+http_request:
+
+update:
+  - platform: esp32_hosted
+    type: http
+    source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
+    name: C6 Firmware
 
 # ---------------------------------------------------------------------------
 # Camera
@@ -161,10 +191,10 @@ rtsp_server:
 
   on_talk_start:
     - switch.turn_on: amp_enable
-    - light.turn_on: status_led
+    - light.turn_on: status_light
   on_talk_end:
     - switch.turn_off: amp_enable
-    - light.turn_off: status_led
+    - light.turn_off: status_light
 
 # ---------------------------------------------------------------------------
 # Doorbell button, chime and indicators — ordinary ESPHome
@@ -262,7 +292,7 @@ switch:
 
 light:
   - platform: status_led
-    id: status_led
+    id: status_light
     pin: GPIO45
 
 text_sensor:

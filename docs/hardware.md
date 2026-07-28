@@ -26,15 +26,17 @@
         └──────────────┘
 ```
 
-Two hardware variants are described in this repository, and their audio wiring
-is **not** interchangeable:
+Three audio wirings are described in this repository, and they are **not**
+interchangeable:
 
 | Config | Audio |
 |---|---|
-| `doorbell-lvgl.yaml`, `doorbell-p4-headless.yaml` | the P4 evboard's own codec: ES8311 out, ES7210 in, driven by `fdaudio` |
+| `doorbell-lvgl.yaml`, `doorbell-p4-headless.yaml` | the P4 evboard's own codecs: ES8311 out, ES7210 in, driven by `fdaudio` |
+| `doorbell-waveshare-p4-nano.yaml` | ES8311 only, in duplex — `fdaudio` with `mic_source: output_codec` |
 | `doorbell.yaml` | INMP441 microphone and MAX98357A amplifier on raw I2S pins, no codec |
 
-This page documents the second, plus the constraints that apply to both.
+This page documents the last one, the ES8311-only case below, and the
+constraints that apply to all of them.
 
 ## ESP32-P4 GPIO constraints
 
@@ -119,14 +121,40 @@ audio path your board can use:
 including the Waveshare ESP32-P4-NANO, ship only the ES8311 and take the
 microphone through the codec's own ADC.
 
-That matters because **`fdaudio` requires an ES7210**: `mic_address` defaults to
-`0x40` and there is no option to fall back to the ES8311's ADC. On such a board
-`fdaudio` cannot bring the microphone up, whatever you set.
+That matters, because `fdaudio` looks for an ES7210 at `mic_address` (`0x40` by
+default) and creating it fails when nothing answers. The failure is not confined
+to the microphone: it aborts `init_codecs_()` as a whole, *after* the output
+device has been created, so **the speaker dies with the microphone and the board
+produces no audio at all**. The symptom says nothing about the cause.
 
-### Use ESPHome's own components instead
+### Option 1 — `mic_source: output_codec` (recommended)
 
-ESPHome's stock `es8311` component can drive the codec's ADC — that is exactly
-what `use_microphone: true` does. Replace the whole `fdaudio:` block with:
+`fdaudio` can capture through the output codec's own ADC instead. One duplex
+`esp_codec_dev` handle then serves both directions, and no ES7210 is opened:
+
+```yaml
+fdaudio:
+  id: audio_engine
+  output_codec: es8311
+  output_address: 0x18
+  # Capture through the ES8311's ADC. `mic_address` is unused in this mode.
+  mic_source: output_codec
+  mic_gain_db: 30      # the ES8311's ADC gain, 0 - 42 dB
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+```
+
+`doorbell-waveshare-p4-nano.yaml` in the repository root is a complete, verified
+configuration built around exactly this.
+
+### Option 2 — ESPHome's own components
+
+If you would rather not depend on `fdaudio` at all, ESPHome's stock `es8311`
+component can drive the codec's ADC — that is what `use_microphone: true` does.
+Replace the whole `fdaudio:` block with:
 
 ```yaml
 i2s_audio:

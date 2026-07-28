@@ -82,17 +82,24 @@ rtsp_server:
 > whole day, keyed on the *branch name* rather than the commit. Without it, a
 > branch that moves forward changes nothing about your next build, silently.
 
-### Three complete example configurations
+### Four complete example configurations
 
 | File | Board | Screen |
 |---|---|---|
-| [`doorbell-lvgl.yaml`](doorbell-lvgl.yaml) | P4 evboard, ES8311/ES7210 codec | 1024×600 MIPI-DSI, LVGL preview |
+| [`doorbell-lvgl.yaml`](doorbell-lvgl.yaml) | P4 evboard, ES8311 + ES7210 | 1024×600 MIPI-DSI, LVGL preview |
 | [`doorbell-p4-headless.yaml`](doorbell-p4-headless.yaml) | the same board | none |
+| [`doorbell-waveshare-p4-nano.yaml`](doorbell-waveshare-p4-nano.yaml) | Waveshare P4-NANO, **ES8311 only** | none |
 | [`doorbell.yaml`](doorbell.yaml) | INMP441 + MAX98357A on raw I2S | none |
 
-The first two describe the *same hardware*; the third is a different, minimal
-build with no audio codec. **Their audio blocks are not interchangeable** — the
-pin assignments belong to different boards.
+The first two describe the *same hardware*. The third is the same design on a
+board with **no ES7210** — see
+[hardware.md](docs/hardware.md#a-board-without-an-es7210-check-the-i2c-scan-first),
+because on such a board the default `fdaudio` settings kill the speaker as well
+as the microphone. The fourth is a different, minimal build with no audio codec.
+
+**The audio blocks are not interchangeable** — the pin assignments belong to
+different boards. Start from the file that matches yours, and confirm with the
+I2C bus scan ESPHome prints at boot.
 
 > The entity names in the example configs are in French (`Sonnette`, `Bouton`,
 > `Micro actif`…), because that is what the author's own installation uses and
