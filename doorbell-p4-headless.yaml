@@ -1,0 +1,418 @@
+# Sonnette ESP32-P4 SANS ÉCRAN — carte P4 evboard, codec ES8311/ES7210.
+#
+# C'est `doorbell-lvgl.yaml` dont on a retiré l'écran, LVGL et l'aperçu caméra.
+# Rien d'autre ne change : même caméra, même codec audio, même serveur RTSP.
+#
+# À ne pas confondre avec `doorbell.yaml`, qui décrit un montage DIFFÉRENT :
+# micro INMP441 et ampli MAX98357A câblés en I2S brut, sans codec. Les deux sont
+# valables, mais leurs blocs audio ne sont pas interchangeables.
+
+substitutions:
+  name: doorbell-p4
+  friendly_name: Sonnette
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  flash_size: 16MB
+  variant: ESP32P4
+  board: esp32-p4-evboard
+  cpu_frequency: 360MHz
+  engineering_sample: true
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+    sdkconfig_options:
+      CONFIG_COMPILER_OPTIMIZATION_PERF: y
+      CONFIG_SPIRAM_XIP_FROM_PSRAM: y
+      CONFIG_GDMA_ISR_IRAM_SAFE: y
+      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
+      CONFIG_SPIRAM_RODATA: "n"
+      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
+      CONFIG_SPIRAM_USE_MALLOC: "y"
+      CONFIG_SPIRAM_SPEED_200M: "y"
+      CONFIG_SPIRAM_SPEED: "200"
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
+      # Le serveur RTSP pousse le RTP directement dans lwIP.
+      CONFIG_LWIP_MAX_SOCKETS: "16"
+      CONFIG_LWIP_SO_RCVBUF: "y"
+      CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
+      CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# L'ESP32-P4 N'A PAS DE RADIO. Le Wi-Fi passe par le compagnon ESP32-C6, et sans
+# ce bloc `wifi:` ne peut rien faire — l'appareil ne se connectera jamais.
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  use_psram: true
+  slot: 1
+
+# La PSRAM hexadécimale du P4 se déclare ici, pas seulement en sdkconfig : les
+# tampons de la caméra et du JPEG y vivent, et sans elle l'allocation échoue.
+psram:
+  mode: hex
+  speed: 200MHz
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_password
+
+captive_portal:
+
+http_request:
+
+update:
+  - platform: esp32_hosted
+    type: http
+    source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
+    name: C6 Firmware
+
+# `refresh: 0s` sur CHAQUE bloc. Par défaut ESPHome garde un clone en cache un
+# jour entier, indexé sur le NOM de la branche et non sur le commit : sans ça,
+# une branche qui avance ne change rien à la compilation suivante.
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/dorbell_P4_rtsp
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
+    components: [rtsp_server]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/esphome_esp-video
+      ref: claude/doorbell-p4-rtsp-audio-gkdosc
+    components: [esp_video, esp_cam_sensor]
+    refresh: 0s
+  - source:
+      type: git
+      url: https://github.com/youkorr/face-toface
+      ref: claude/mit-license-face-to-face-p9fc6m
+    components: [fdaudio]
+    refresh: 0s
+
+## ===========================================================================
+##  Bus, audio, caméra
+## ===========================================================================
+
+i2c:
+  - id: bsp_bus
+    sda: GPIO07
+    scl: GPIO08
+    frequency: 400kHz
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+# Codec de la carte : ES8311 en sortie, ES7210 en entrée.
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 30
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: false
+  mic_agc: 0
+  echo_suppression: 0
+  noise_gate: 0
+
+microphone:
+  - platform: fdaudio
+    id: board_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: board_speaker
+    fdaudio_id: audio_engine
+
+esp_video:
+  i2c_id: bsp_bus
+  xclk_pin: GPIO36
+  xclk_freq: 24000000
+  enable_jpeg: true
+  enable_isp: true
+  use_heap_allocator: false
+
+esp_cam_sensor:
+  id: p4_cam
+  i2c_id: bsp_bus
+  sensor_type: ov5647
+  resolution: "800x640"
+  framerate: 30
+  mirror_x: false
+  mirror_y: false
+  rotation: 0
+
+## ===========================================================================
+##  Serveur RTSP
+## ===========================================================================
+
+rtsp_server:
+  id: doorbell_stream
+  port: 8554
+  path: /doorbell
+  username: !secret rtsp_username
+  password: !secret rtsp_password
+  # La chaîne MJPEG coûte DEUX sessions RTSP à go2rtc (transcodage + backchannel).
+  # 4 laisse de la marge pour un VLC de diagnostic.
+  max_clients: 4
+
+  # Annonce la piste `sendonly` à tout le monde, pas seulement au client qui
+  # envoie l'en-tête ONVIF. Sans ça, go2rtc et les cartes Lovelace ne voient pas
+  # que la caméra sait parler, et le bouton micro n'apparaît jamais.
+  backchannel: always
+
+  video:
+    # `camera_id` est OBLIGATOIRE dès que `esp_cam_sensor:` est déclaré : sinon
+    # les deux composants ouvrent /dev/video0 chacun de leur côté et se le
+    # disputent. Sans écran, personne d'autre ne dépile les tampons V4L2, donc
+    # le serveur s'en charge : drive_camera reste à `true` (le défaut).
+    camera_id: p4_cam
+    framerate: 15
+    jpeg_quality: 25
+
+  audio:
+    codec: pcmu
+    sample_rate: 16000
+    microphone_id: board_microphone
+    speaker_id: board_speaker
+    # Mesuré sur cette carte : le codec seul délivre environ -58 dBFS, ce qui est
+    # inaudible. 8.0 = +18 dB. Ajustez en lisant `max/60s` dans les logs, cible
+    # -30..-6 dBFS en parlant devant la sonnette.
+    gain: 8.0
+    volume: 0.8
+    half_duplex: true
+    talk_timeout: 300ms
+
+  # Ces déclencheurs appartiennent au serveur RTSP, PAS au bloc `speaker:`.
+  on_talk_start:
+    - switch.turn_on: audio_amplifier
+    - light.turn_on: status_led
+  on_talk_end:
+    - light.turn_off: status_led
+
+## ===========================================================================
+##  Sonnerie — les trois chemins vers Home Assistant
+## ===========================================================================
+
+# L'entité que Home Assistant comprend nativement comme une sonnette.
+event:
+  - platform: template
+    id: doorbell_event
+    name: "Sonnette"
+    device_class: doorbell
+    event_types:
+      - pressed
+
+binary_sensor:
+  - platform: gpio
+    id: doorbell_button
+    name: "Bouton"
+    device_class: occupancy
+    pin:
+      number: GPIO32
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 100ms
+    on_press:
+      - script.execute: ring
+
+  # Diagnostic audio, lisible depuis Home Assistant.
+  - platform: template
+    name: "Micro actif"
+    device_class: problem
+    entity_category: diagnostic
+    # À l'envers exprès : ON = il y a un problème, la source ne délivre plus rien.
+    lambda: 'return !id(doorbell_stream).mic_alive();'
+  - platform: template
+    name: "Sortie audio en defaut"
+    device_class: problem
+    entity_category: diagnostic
+    lambda: 'return !id(doorbell_stream).speaker_healthy();'
+  - platform: template
+    name: "On vous parle"
+    entity_category: diagnostic
+    lambda: 'return id(doorbell_stream).is_talking();'
+
+script:
+  - id: ring
+    mode: restart
+    then:
+      - logger.log:
+          format: "ring: sequence declenchee"
+          level: INFO
+      - switch.turn_on: chime_relay
+      - event.trigger:
+          id: doorbell_event
+          event_type: pressed
+      - homeassistant.event:
+          event: esphome.doorbell_pressed
+          data:
+            device: ${name}
+      - delay: 1s
+      - switch.turn_off: chime_relay
+
+button:
+  # Déclenche la même séquence que l'appui, depuis Home Assistant.
+  - platform: template
+    name: "Sonner"
+    icon: mdi:bell-ring
+    on_press:
+      - script.execute: ring
+
+  - platform: template
+    name: "Bip de test"
+    icon: mdi:volume-high
+    entity_category: diagnostic
+    on_press:
+      - switch.turn_on: audio_amplifier
+      - rtsp_server.play_test_tone:
+          id: doorbell_stream
+          frequency: 1000
+          duration: 600ms
+
+switch:
+  - platform: gpio
+    id: chime_relay
+    name: "Carillon"
+    pin: GPIO33
+    restore_mode: ALWAYS_OFF
+
+  # L'ampli de CETTE carte est sur GPIO53, pas GPIO28 (qui appartient au montage
+  # MAX98357A de `doorbell.yaml`).
+  - platform: gpio
+    id: audio_amplifier
+    name: "Amplificateur audio"
+    pin: GPIO53
+    restore_mode: ALWAYS_ON
+
+  # Test d'établi : parlez, vous devez vous entendre. Il s'arrête tout seul au
+  # bout de deux minutes — micro et haut-parleur partagent la carte, et la boucle
+  # part en Larsen tout en disputant le haut-parleur au vrai backchannel.
+  - platform: template
+    name: "Test audio (boucle micro vers haut-parleur)"
+    id: audio_loopback_switch
+    icon: mdi:microphone-message
+    entity_category: diagnostic
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    turn_on_action:
+      - switch.turn_on: audio_amplifier
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: true
+    turn_off_action:
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: false
+
+light:
+  - platform: status_led
+    id: status_led
+    pin: GPIO45
+
+text_sensor:
+  - platform: template
+    name: "Flux RTSP"
+    lambda: 'return {id(doorbell_stream).stream_url()};'
+    update_interval: 60s
+
+sensor:
+  - platform: template
+    name: "Clients RTSP"
+    lambda: 'return id(doorbell_stream).client_count();'
+    update_interval: 10s
+    accuracy_decimals: 0
+
+  # Le niveau du micro sur une minute glissante. L'instantané retombe en une
+  # seconde et ne veut rien dire à l'échelle d'un capteur.
+  - platform: template
+    name: "Niveau micro"
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    device_class: sound_pressure
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).mic_peak_hold_db();'
+
+  - platform: template
+    name: "Niveau haut-parleur"
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    device_class: sound_pressure
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).speaker_peak_hold_db();'
+
+  # Reste à 0 pendant qu'on parle depuis Home Assistant = la voix descendante
+  # n'atteint pas l'appareil ; le défaut est en amont.
+  - platform: template
+    name: "Paquets audio recus"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).audio_packets_received();'
+
+  # Doivent rester égaux. Un écart ne s'entend pas comme une perte de qualité,
+  # il s'entend comme rien du tout.
+  - platform: template
+    name: "Octets audio proposes au HP"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return id(doorbell_stream).speaker_bytes_offered();'
+
+  - platform: template
+    name: "Octets audio acceptes par le HP"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return id(doorbell_stream).speaker_bytes_written();'
