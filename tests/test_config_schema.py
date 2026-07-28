@@ -90,6 +90,13 @@ results.append(run("codec: h264 rejected with an explanation", h264, False, "onl
 # ...while an explicit 'codec: mjpeg' keeps working, so existing configs load.
 results.append(run("codec: mjpeg still accepted", {"id": "s", "video": {"codec": "mjpeg"}}, True))
 
+# `backchannel` one level too deep is the mistake the terse ESPHome message
+# ("[backchannel] is an invalid option for [video]") does not help with: it names
+# the key but not the fix, so the natural reading is "that option does not exist".
+results.append(run("backchannel inside video: rejected with the fix",
+                   {"id": "s", "video": {"backchannel": "always"}}, False,
+                   "belongs directly under 'rtsp_server:'"))
+
 # Audio source mix-ups.
 mix = dict(headless); mix["audio"] = dict(headless["audio"]); mix["audio"]["microphone_id"] = "m"
 results.append(run("microphone_id + I2S pins rejected", mix, False, "choose one audio source"))

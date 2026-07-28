@@ -168,9 +168,28 @@ def _validate_codec(value):
     )
 
 
+def _misplaced_backchannel(value):
+    """`backchannel` sits next to `video:`, not inside it.
+
+    ESPHome's own message for an unknown key -- "[backchannel] is an invalid
+    option for [video]" -- names the key but not the fix, and the natural guess
+    is that the option does not exist rather than that it is one line too deep.
+    """
+    raise cv.Invalid(
+        "'backchannel' belongs directly under 'rtsp_server:', at the same indentation as 'video:' and "
+        "'audio:', not inside 'video:'. Move it out one level:\n"
+        "  rtsp_server:\n"
+        "    backchannel: always\n"
+        "    video:\n"
+        "      ..."
+    )
+
+
 VIDEO_SCHEMA = cv.Schema(
     {
         cv.Optional(CONF_CODEC): _validate_codec,
+        # Caught here on purpose, to say where the key actually goes.
+        cv.Optional(CONF_BACKCHANNEL): _misplaced_backchannel,
         # Share an esp_cam_sensor camera (its RGB565 frames also feed LVGL).
         # Omit it to open the V4L2 device directly, for a headless build.
         cv.Optional(CONF_CAMERA_ID): cv.use_id(MipiDSICamComponent),
