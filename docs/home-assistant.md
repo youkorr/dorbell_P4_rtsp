@@ -486,6 +486,10 @@ lues dans le schéma de la carte (`src/config/schema/`) :
 | `live.auto_mute` | `unselected`, `hidden`, `microphone` |
 | `view.triggers.actions.trigger` | `default`, `live`, `media`, `none`, `update` |
 | `view.triggers.actions.untrigger` | `default`, `none` |
+| `menu.buttons.microphone.type` | `momentary`, `toggle` |
+
+`menu.buttons.microphone.enabled` vaut **`false` par défaut** : le mettre à
+`true` n'est pas une redondance, c'est ce qui fait exister le bouton.
 
 `binary_sensor.doorbell_p4_lvgl_bouton` suppose `name: doorbell-p4-lvgl` dans
 votre YAML ESPHome. Vérifiez l'identifiant exact dans **Outils de développement →
