@@ -35,6 +35,13 @@ screen, so the same frame feeds a local preview and the network stream.
 - **go2rtc**, standalone or inside Frigate, to republish the stream as WebRTC;
 - ESPHome 2025.5 or newer.
 
+> **Check your board's I2C scan before copying an audio block.** The example
+> configs use `fdaudio`, which needs an **ES7210** microphone ADC at `0x40`.
+> Several ESP32-P4 boards — the Waveshare ESP32-P4-NANO among them — ship only
+> the ES8311 at `0x18` and take the microphone through the codec's own ADC. On
+> those, use ESPHome's stock `es8311` component with `use_microphone: true`;
+> [`docs/hardware.md`](docs/hardware.md) gives the replacement block.
+
 ## Quick start
 
 ```yaml

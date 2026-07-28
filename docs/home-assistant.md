@@ -844,3 +844,4 @@ And on the output side, `Octets audio proposes` versus `acceptes`:
 | `RTSP: unsupported transport` | a client is forcing UDP; this server is TCP-interleaved only |
 | `Unable to find action with the name 'rtsp_server.…'` | ESPHome is compiling an old copy: wrong `ref:`, or the 24 h cache. Set `refresh: 0s` and delete `.esphome/external_components` |
 | `codec: h264` rejected at compile time | intentional — H.264 was removed, see the README |
+| Audio never starts, and the I2C scan shows no device at `0x40` | the board has no ES7210. `fdaudio` requires one; use ESPHome's `es8311` with `use_microphone: true` instead — see `hardware.md` |
