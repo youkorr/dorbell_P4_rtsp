@@ -196,7 +196,7 @@ MICROPHONE_SCHEMA = cv.Schema(
         cv.Required(CONF_DIN_PIN): pins.internal_gpio_input_pin_number,
         cv.Optional(CONF_BITS_PER_SAMPLE, default=32): cv.one_of(16, 32, int=True),
         cv.Optional(CONF_CHANNEL, default="left"): cv.enum(CHANNELS, lower=True),
-        cv.Optional(CONF_GAIN, default=4.0): cv.float_range(min=0.1, max=64.0),
+        cv.Optional(CONF_GAIN, default=4.0): cv.float_range(min=0.1, max=256.0),
     }
 )
 
@@ -280,7 +280,7 @@ AUDIO_SCHEMA = cv.All(
             # audio comes from a component ('microphone_id'), which used to leave
             # no way at all to fix a microphone that arrives too quiet. Set here,
             # these win over the nested values.
-            cv.Optional(CONF_GAIN): cv.float_range(min=0.1, max=64.0),
+            cv.Optional(CONF_GAIN): cv.float_range(min=0.1, max=256.0),
             cv.Optional(CONF_VOLUME): cv.float_range(min=0.0, max=1.0),
             cv.Optional(CONF_HALF_DUPLEX, default=True): cv.boolean,
             cv.Optional(CONF_TALK_TIMEOUT, default="300ms"): cv.positive_time_period_milliseconds,

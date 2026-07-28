@@ -119,6 +119,11 @@ class RTSPServer : public Component, public RtpSender {
   /// Peak level of what is being pushed to the speaker, 0.0 – 1.0.
   float speaker_level() const { return this->audio_.speaker_level(); }
   float speaker_level_db() const { return this->audio_.speaker_level_db(); }
+  /// Loudest level of the last minute. This is the one to put on a Home
+  /// Assistant sensor: a level that decays in a second is unreadable at any
+  /// polling interval a sensor can use.
+  float mic_peak_hold_db() const { return this->audio_.mic_peak_hold_db(); }
+  float speaker_peak_hold_db() const { return this->audio_.speaker_peak_hold_db(); }
   /// Bytes handed to the speaker versus bytes it accepted. `written` stuck at 0
   /// while `offered` climbs is the signature of a sink that refuses everything.
   uint32_t speaker_bytes_offered() const { return this->audio_.speaker_bytes_offered(); }

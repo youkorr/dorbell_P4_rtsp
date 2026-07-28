@@ -37,6 +37,9 @@ static constexpr int64_t PEAK_HOLD_US = 1000000;
 static constexpr int64_t MIC_ALIVE_US = 2000000;
 /// Reported instead of -inf dBFS, so a sensor never has to carry an infinity.
 static constexpr float SILENCE_DBFS = -100.0f;
+/// Window of the long-hold meters: long enough that a status line printed every
+/// ten seconds still catches a spoken word.
+static constexpr int64_t PEAK_HOLD_LONG_US = 60000000;
 
 /// Saturate to the 16-bit PCM range.
 ///
@@ -188,7 +191,8 @@ void AudioPipeline::account_write_(const int16_t *src, size_t offered_bytes, siz
   if (written_bytes == 0)
     return;
   const size_t accepted_samples = written_bytes / (bytes_per_sample == 0 ? 1 : bytes_per_sample);
-  update_peak_(&this->speaker_peak_, &this->speaker_peak_us_, src, accepted_samples);
+  this->update_hold_(&this->speaker_hold_, &this->speaker_hold_since_us_,
+                     update_peak_(&this->speaker_peak_, &this->speaker_peak_us_, src, accepted_samples));
 }
 
 void AudioPipeline::write_pcm_(const int16_t *src, size_t samples) {
@@ -410,8 +414,19 @@ int16_t AudioPipeline::expand_(uint8_t value) const {
 /// Deliberately lock-free. Each meter has one writer in practice, and the only
 /// consequence of a race would be a meter reading one block out of date -- not
 /// worth a mutex on the audio path.
-void AudioPipeline::update_peak_(volatile uint32_t *peak, volatile int64_t *stamp, const int16_t *pcm,
-                                 size_t samples) {
+void AudioPipeline::update_hold_(volatile uint32_t *hold, volatile int64_t *since, uint32_t block_peak) {
+  const int64_t now = esp_timer_get_time();
+  if (*since == 0 || (now - *since) > PEAK_HOLD_LONG_US) {
+    *hold = block_peak;
+    *since = now;
+    return;
+  }
+  if (block_peak > *hold)
+    *hold = block_peak;
+}
+
+uint32_t AudioPipeline::update_peak_(volatile uint32_t *peak, volatile int64_t *stamp, const int16_t *pcm,
+                                     size_t samples) {
   uint32_t block_peak = 0;
   for (size_t i = 0; i < samples; i++) {
     // -32768 has no positive counterpart in int16_t, so widen before negating.
@@ -429,6 +444,7 @@ void AudioPipeline::update_peak_(volatile uint32_t *peak, volatile int64_t *stam
     *peak = block_peak;
     *stamp = now;
   }
+  return block_peak;
 }
 
 float AudioPipeline::read_peak_(volatile uint32_t peak, volatile int64_t stamp) {
@@ -477,6 +493,18 @@ const char *AudioPipeline::speaker_level_bar() const {
   render_bar_(this->speaker_bar_, this->speaker_level());
   return this->speaker_bar_;
 }
+
+/// A held peak does not decay, so it is read straight rather than through
+/// read_peak_ -- the whole point is that it survives the quiet moments.
+static float hold_to_db(uint32_t hold) {
+  if (hold == 0)
+    return SILENCE_DBFS;
+  return 20.0f * std::log10(static_cast<float>(hold) / 32768.0f);
+}
+
+float AudioPipeline::mic_peak_hold_db() const { return hold_to_db(this->mic_hold_); }
+
+float AudioPipeline::speaker_peak_hold_db() const { return hold_to_db(this->speaker_hold_); }
 
 bool AudioPipeline::speaker_healthy() const {
   if (!this->has_speaker())
@@ -597,7 +625,8 @@ void AudioPipeline::capture_run_() {
     // Metered before the half-duplex mute, on purpose: the meter answers "does
     // the microphone hear anything", and that question stays valid -- and worth
     // asking -- while the far end is talking and the mic is being held silent.
-    update_peak_(&this->mic_peak_, &this->mic_peak_us_, narrowband.data(), out_count);
+    this->update_hold_(&this->mic_hold_, &this->mic_hold_since_us_,
+                       update_peak_(&this->mic_peak_, &this->mic_peak_us_, narrowband.data(), out_count));
 
     if (this->loopback_) {
       // Back up to the sink's rate before writing, or the monitor plays an

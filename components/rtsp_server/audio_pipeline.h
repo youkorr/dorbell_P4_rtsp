@@ -143,6 +143,17 @@ class AudioPipeline {
   const char *mic_level_bar() const;
   const char *speaker_level_bar() const;
 
+  /// Loudest level seen over a long window (about a minute), in dBFS.
+  ///
+  /// `mic_level_db()` decays in a second, which is right for a live meter but
+  /// useless in a status block printed every ten: unless you happen to be
+  /// speaking at that exact instant, it reports room tone and the microphone
+  /// looks dead. This one answers the question that actually matters -- "what
+  /// is the loudest thing this microphone has heard recently" -- so a single
+  /// log line is enough to tell a quiet room from a deaf microphone.
+  float mic_peak_hold_db() const;
+  float speaker_peak_hold_db() const;
+
   /// PCM samples read from the microphone since boot. Stuck at 0 (or simply
   /// stuck) means the source delivers nothing -- a different fault from a source
   /// that delivers silence, and one no amount of gain will fix.
@@ -178,8 +189,12 @@ class AudioPipeline {
   void write_pcm_(const int16_t *src, size_t samples);
   void on_external_mic_data_(const std::vector<uint8_t> &data);
 
-  /// Record the peak of a PCM block into a decaying meter.
-  static void update_peak_(volatile uint32_t *peak, volatile int64_t *stamp, const int16_t *pcm, size_t samples);
+  /// Record the peak of a PCM block into a decaying meter. Returns that block's
+  /// own peak, so the caller can feed it to the long-hold meter too.
+  static uint32_t update_peak_(volatile uint32_t *peak, volatile int64_t *stamp, const int16_t *pcm,
+                               size_t samples);
+  /// Fold one block peak into a meter that holds for about a minute.
+  static void update_hold_(volatile uint32_t *hold, volatile int64_t *since, uint32_t block_peak);
   /// Read a decaying meter back as 0.0 – 1.0.
   static float read_peak_(volatile uint32_t peak, volatile int64_t stamp);
   /// Fill `dst` (>= 13 bytes) with a "[####------]" meter for `level`.
@@ -220,6 +235,14 @@ class AudioPipeline {
   volatile int64_t mic_peak_us_{0};
   volatile uint32_t speaker_peak_{0};
   volatile int64_t speaker_peak_us_{0};
+
+  /// Same meters over a long window, so a status line printed every ten seconds
+  /// still reports the loudest sound of the last minute rather than whatever
+  /// happened to be there at that instant.
+  volatile uint32_t mic_hold_{0};
+  volatile int64_t mic_hold_since_us_{0};
+  volatile uint32_t speaker_hold_{0};
+  volatile int64_t speaker_hold_since_us_{0};
 
   volatile uint32_t mic_samples_{0};
   volatile int64_t mic_last_sample_us_{0};

@@ -160,8 +160,12 @@ oc = rtsp.CONFIG_SCHEMA(over)["audio"]
 assert rtsp._level(oc, rtsp.CONF_GAIN, oc["microphone"], 1.0) == 2.5
 assert rtsp._level(oc, rtsp.CONF_VOLUME, oc["speaker"], 1.0) == 0.1
 
-results.append(run("gain out of range rejected", {"id": "s", "audio": {"microphone_id": "m", "gain": 99.0}},
-                   False, "value must be at most 64"))
+# The ceiling is 256, not 64: a codec that delivers -58 dBFS needs about +38 dB
+# (x80) to reach a usable speech level, and 64 was not enough to get there.
+results.append(run("gain of 80 accepted (a quiet codec needs it)",
+                   {"id": "s", "audio": {"microphone_id": "m", "gain": 80.0}}, True))
+results.append(run("gain out of range rejected", {"id": "s", "audio": {"microphone_id": "m", "gain": 999.0}},
+                   False, "value must be at most 256"))
 print("PASS   gain/volume reachable on the component path, overriding the I2S blocks")
 
 

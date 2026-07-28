@@ -232,12 +232,20 @@ rtsp_server:
     # piloter des broches I2S : le codec reste partagé avec les autres usages.
     microphone_id: board_microphone
     speaker_id: board_speaker
-    # Niveaux appliqués par le pipeline RTSP, APRÈS ceux du codec. On les laisse
-    # neutres ici : fdaudio fait déjà l'AGC (`mic_agc` ci-dessus), et empiler un
-    # gain fixe par-dessus une AGC ne rend pas plus fort, ça écrête. Réglez le
-    # niveau en amont, dans le bloc `fdaudio:`.
-    # Ces deux options servent surtout au chemin I2S direct, sans codec.
-    gain: 1.0
+    # Gain numérique appliqué APRÈS le codec.
+    #
+    # Il était à 1.0, au motif que fdaudio fait déjà de l'AGC et qu'empiler un
+    # gain fixe par-dessus ne ferait qu'écrêter. La mesure a tranché : sur cette
+    # carte le micro arrive vers -58 dBFS, soit un millième de la pleine échelle.
+    # L'AGC ne le remonte pas, et à ce niveau on n'entend rien — ni dans Home
+    # Assistant, ni même dans la boucle locale.
+    #
+    # 8.0 = +18 dB, ce qui amène -58 dBFS vers -40. Montez par paliers en
+    # regardant `max/60s` dans les logs, cible -30..-6 dBFS en parlant devant la
+    # sonnette. Si le souffle monte autant que la voix, c'est que le gain est en
+    # train d'amplifier du bruit : redescendez et augmentez plutôt `mic_gain_db`
+    # dans le bloc `fdaudio:`, qui agit avant le convertisseur.
+    gain: 8.0
     volume: 0.8
     half_duplex: true
     talk_timeout: 300ms

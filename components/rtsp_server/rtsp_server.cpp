@@ -390,12 +390,30 @@ void RTSPServer::log_status_() {
     //   samples rising,     -> the source delivers digital silence (mic muted,
     //   level -100 dB          gain at zero, wrong I2S slot, dead capsule)
     //   level around -60 dB -> it works, it is just quiet: raise the gain
-    ESP_LOGI(TAG, "  mic:   %" PRIu32 " samples read (%s), peak %.1f dBFS %s",
+    // Two readings, because one of them is almost always misleading on its own.
+    // `now` decays in a second, so unless you happen to be speaking at the exact
+    // moment this line is printed it shows room tone. `max/60s` is the loudest
+    // thing heard in the last minute -- that is the one that separates a quiet
+    // room from a microphone that hears nothing.
+    ESP_LOGI(TAG, "  mic:   %" PRIu32 " samples read (%s), now %.1f dBFS %s  max/60s %.1f dBFS",
              this->audio_.mic_samples(), this->audio_.mic_alive() ? "flowing" : "STOPPED",
-             static_cast<double>(this->audio_.mic_level_db()), this->audio_.mic_level_bar());
+             static_cast<double>(this->audio_.mic_level_db()), this->audio_.mic_level_bar(),
+             static_cast<double>(this->audio_.mic_peak_hold_db()));
+
+    // Speech should reach -30..-6 dBFS. Much below that and the far end hears
+    // nothing, however healthy every counter above may look.
+    const float hold = this->audio_.mic_peak_hold_db();
+    if (this->audio_.mic_alive() && hold > -100.0f && hold < -40.0f) {
+      ESP_LOGW(TAG,
+               "         the loudest sound of the last minute was %.1f dBFS -- far too quiet. Speech should "
+               "reach -30..-6 dBFS. Raise the gain (the codec's own first, then 'gain:' here).",
+               static_cast<double>(hold));
+    }
     if (this->audio_.has_speaker()) {
-      ESP_LOGI(TAG, "  spk:   peak %.1f dBFS %s%s", static_cast<double>(this->audio_.speaker_level_db()),
-               this->audio_.speaker_level_bar(), this->audio_.loopback() ? "  <-- LOOPBACK TEST ON" : "");
+      ESP_LOGI(TAG, "  spk:   now %.1f dBFS %s  max/60s %.1f dBFS%s",
+               static_cast<double>(this->audio_.speaker_level_db()), this->audio_.speaker_level_bar(),
+               static_cast<double>(this->audio_.speaker_peak_hold_db()),
+               this->audio_.loopback() ? "  <-- LOOPBACK TEST ON" : "");
       // The line that answers "I press the test beep and hear nothing". The
       // speaker reports how much it took; offered without written means the
       // sink refuses the data and no volume setting will ever produce a sound.
