@@ -222,6 +222,48 @@ id(doorbell_stream).is_talking();     // audio backchannel en cours
 id(doorbell_stream).set_drive_camera(true);  // reprendre le dequeue V4L2
 ```
 
+## À quoi ressemble une chaîne qui fonctionne
+
+Le bloc de statut d'une sonnette en pleine conversation, à garder comme étalon :
+
+```
+--- status ------------------------------------------------
+  clients=2 playing=2 | negotiated across all sessions: video=yes audio=yes backchannel=yes
+  video: 7585 encoded, 0 skipped | tx: 282 packets, 19 frames dropped
+  audio: mic 31452 packets sent | backchannel 16255 received, 121 dropped  <-- TALKING NOW
+  mic:   8051712 samples read (flowing), now -41.1 dBFS [###-------]  max/60s -11.0 dBFS
+  spk:   now -18.1 dBFS [######----]  max/60s -4.7 dBFS
+         10506240 bytes offered, 10506240 accepted, 0 short writes
+-----------------------------------------------------------
+```
+
+Les cinq lignes qui comptent, et ce qu'elles valident :
+
+| Lecture | Ce qu'elle prouve |
+|---|---|
+| `backchannel=yes` | la piste montante est négociée — c'est ce que `backchannel: always` rend possible |
+| `backchannel N received` avec N qui monte | la voix de Home Assistant atteint vraiment l'appareil |
+| `mic max/60s` entre −30 et −6 dBFS | le micro capte à un niveau exploitable |
+| `spk` qui bouge pendant qu'on parle | le son sort réellement |
+| **`offered == accepted`, `0 short writes`** | rien n'est perdu entre le décodage et le haut-parleur |
+
+La dernière est la plus importante et la moins évidente : un écart entre
+`offered` et `accepted` ne se voit ni ne s'entend comme une perte, il s'entend
+comme *rien du tout*.
+
+Les réglages qui amènent là, sur une carte à codec ES8311/ES7210 :
+
+```yaml
+rtsp_server:
+  backchannel: always     # sans ça, aucun bouton « parler » n'apparaît
+  audio:
+    microphone_id: board_microphone
+    speaker_id: board_speaker
+    gain: 8.0             # +18 dB ; le codec seul arrivait à -58 dBFS
+    volume: 0.8
+    half_duplex: true
+```
+
 ## « Je ne sais pas si le micro et l'audio fonctionnent »
 
 C'est la panne la plus difficile à situer de toute la chaîne : entre la capsule
