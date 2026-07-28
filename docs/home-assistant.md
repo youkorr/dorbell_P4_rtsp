@@ -382,14 +382,34 @@ de caméra dans `frigate.yaml`.
 
 ## 5. Carte Lovelace — Advanced Camera Card
 
-### D'abord : le nom de la carte a changé
+### `frigate-card` ou `advanced-camera-card` ?
 
-`custom:frigate-card` est l'ancien nom. La carte s'appelle désormais
-**`custom:advanced-camera-card`** (dépôt `dermotduffy/advanced-camera-card`).
-L'ancien nom fonctionne encore sur les installations qui n'ont pas été mises à
-jour, mais toute la documentation actuelle — et les clés ci-dessous — parlent du
-nouveau. Si la carte refuse une clé, c'est presque toujours qu'elle est d'une
-version antérieure : le message d'erreur nomme la clé fautive.
+Les deux marchent, et ce n'est pas un hasard. Dans la source de la carte :
+
+```ts
+// Keep the old name around for backwards compatibility.
+@customElement('frigate-card')
+class FrigateCard extends AdvancedCameraCard {}
+```
+
+`custom:frigate-card` est donc un **alias pur** — la même classe, le même schéma
+de configuration, aucune différence de comportement. Une configuration écrite
+pour l'un fonctionne mot pour mot avec l'autre. Inutile de réécrire quoi que ce
+soit ; `advanced-camera-card` est simplement le nom actuel.
+
+Ce qui compte en revanche, c'est la **version installée**, car le schéma, lui, a
+bougé. Elle se lit dans HACS, ou dans les outils de développement du navigateur.
+Repères utiles :
+
+| Version | À savoir |
+|---|---|
+| ≥ 7.27.0 | exige Home Assistant ≥ 2026.2 |
+| 7.27.4 | dernière stable au moment où ceci est écrit |
+| 8.0.0-rc | **restructure les automatisations** : `triggers:` obligatoires, `conditions:` séparées, `actions_not` supprimé, état du micro scindé. Ne pas y aller avant d'avoir relu ses notes de version |
+
+Les clés utilisées ci-dessous sont celles des versions 7.x. Si la carte se
+plaint d'une clé, son message la nomme : c'est presque toujours une version
+antérieure.
 
 ### La carte, avec les valeurs de ce dépôt
 
@@ -421,21 +441,34 @@ live:
   # La vue est prête avant l'appui : sans ça on regarde tourner un spinner
   # pendant que le visiteur attend.
   preload: true
+  # Valeurs admises : selected, visible, microphone. La troisième compte —
+  # elle démute automatiquement au moment où le micro se connecte, sans quoi on
+  # parle dans le vide en croyant que le push-to-talk est cassé.
   auto_unmute:
     - selected
     - visible
+    - microphone
   microphone:
+    # false = le micro ne se connecte qu'au moment où on appuie. `true` évite la
+    # coupure du flux au premier appui, au prix d'un micro ouvert en permanence.
     always_connected: false
+    disconnect_seconds: 90
 
 view:
   default: live
   triggers:
     show_trigger_status: true
+    filter_selected_camera: true
     actions:
+      # Valeurs admises pour `trigger` : default, live, media, none, update.
+      # Pour `untrigger` : default, none. Rien d'autre ne validera.
       trigger: live          # la sonnerie amène la vue en direct
       untrigger: default     # et on revient à la vue normale ensuite
-  # Combien de temps la vue reste sur le direct après la fin de l'appui.
-  interaction_seconds: 30
+    # Combien de temps la vue reste sur le direct APRÈS que la sonnerie retombe.
+    # C'est bien celui-ci qu'on veut régler, et non `interaction_seconds`, qui
+    # dit tout autre chose : combien de temps une interaction de l'utilisateur
+    # suspend les déclencheurs (300 s par défaut).
+    untrigger_seconds: 30
 
 menu:
   buttons:
@@ -443,6 +476,16 @@ menu:
       enabled: true
       type: momentary        # maintenir pour parler ; 'toggle' pour un verrou
 ```
+
+Les valeurs d'énumération ci-dessus ne sont pas des suppositions, elles sont
+lues dans le schéma de la carte (`src/config/schema/`) :
+
+| Clé | Valeurs admises |
+|---|---|
+| `live.auto_unmute` | `selected`, `visible`, `microphone` |
+| `live.auto_mute` | `unselected`, `hidden`, `microphone` |
+| `view.triggers.actions.trigger` | `default`, `live`, `media`, `none`, `update` |
+| `view.triggers.actions.untrigger` | `default`, `none` |
 
 `binary_sensor.doorbell_p4_lvgl_bouton` suppose `name: doorbell-p4-lvgl` dans
 votre YAML ESPHome. Vérifiez l'identifiant exact dans **Outils de développement →
