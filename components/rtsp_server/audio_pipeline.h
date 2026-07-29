@@ -77,8 +77,17 @@ class AudioPipeline {
     /// Mute the microphone while the far end is talking, to stop the speaker
     /// from feeding back into the microphone. There is no echo canceller.
     bool half_duplex{true};
-    /// How long after the last backchannel packet the call is considered over.
-    uint32_t talk_timeout_ms{300};
+    /// How long the microphone stays muted after the far end's audio has
+    /// actually finished coming out of the speaker -- not after the last packet
+    /// arrived, which is a jitter buffer earlier.
+    ///
+    /// This is the room's reverberation time, nothing else. Too short and the
+    /// microphone reopens while the far end's own voice is still ringing in the
+    /// room, sends it back, and every word comes home as an echo. 300 ms was
+    /// that mistake; 500 ms suits a normal entrance hall. A bare, hard-walled
+    /// stairwell may want 800 ms or more -- at the cost of how quickly the
+    /// visitor can interrupt.
+    uint32_t talk_timeout_ms{500};
 
     uint32_t task_stack{4096};
     uint8_t task_priority{6};
@@ -234,7 +243,11 @@ class AudioPipeline {
 
   volatile bool running_{false};
   volatile bool should_stop_{false};
+  /// When a backchannel packet last arrived from the network.
   volatile int64_t last_playback_us_{0};
+  /// When far-end audio was last actually handed to the speaker. Later than the
+  /// above by the depth of the jitter buffer; see is_talking().
+  volatile int64_t last_speaker_write_us_{0};
 
   volatile uint32_t packets_sent_{0};
   volatile uint32_t packets_received_{0};

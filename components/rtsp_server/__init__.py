@@ -302,7 +302,11 @@ AUDIO_SCHEMA = cv.All(
             cv.Optional(CONF_GAIN): cv.float_range(min=0.1, max=256.0),
             cv.Optional(CONF_VOLUME): cv.float_range(min=0.0, max=1.0),
             cv.Optional(CONF_HALF_DUPLEX, default=True): cv.boolean,
-            cv.Optional(CONF_TALK_TIMEOUT, default="300ms"): cv.positive_time_period_milliseconds,
+            # How long the microphone stays muted AFTER the far end's audio has
+            # finished leaving the speaker. Effectively the room's reverberation
+            # time: too short and every word comes back as an echo. 500 ms suits
+            # a normal hallway; a bare stairwell may need 800 ms.
+            cv.Optional(CONF_TALK_TIMEOUT, default="500ms"): cv.positive_time_period_milliseconds,
         }
     ),
     _validate_audio,

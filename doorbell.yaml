@@ -187,7 +187,13 @@ rtsp_server:
     # There is no acoustic echo canceller: mute the microphone while the far
     # end is talking so the speaker cannot loop back into it.
     half_duplex: true
-    talk_timeout: 300ms
+    # Time the microphone stays muted AFTER the far end's voice has finished
+    # leaving the speaker -- so, in practice, the room's reverberation time.
+    # Too short and the mic reopens while the far end is still ringing in the
+    # room, sends it back, and every word returns as an echo. Raise towards
+    # 800ms in a bare, hard-walled stairwell; the cost is how fast the visitor
+    # can interrupt.
+    talk_timeout: 500ms
 
   on_talk_start:
     - switch.turn_on: amp_enable

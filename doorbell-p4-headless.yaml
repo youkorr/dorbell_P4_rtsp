@@ -205,7 +205,13 @@ rtsp_server:
     gain: 8.0
     volume: 0.8
     half_duplex: true
-    talk_timeout: 300ms
+    # Time the microphone stays muted AFTER the far end's voice has finished
+    # leaving the speaker -- so, in practice, the room's reverberation time.
+    # Too short and the mic reopens while the far end is still ringing in the
+    # room, sends it back, and every word returns as an echo. Raise towards
+    # 800ms in a bare, hard-walled stairwell; the cost is how fast the visitor
+    # can interrupt.
+    talk_timeout: 500ms
 
   on_talk_start:
     - switch.turn_on: audio_amplifier

@@ -610,9 +610,27 @@ size_t AudioPipeline::take_test_tone_(int16_t *dst, size_t samples) {
 }
 
 bool AudioPipeline::is_talking() const {
-  if (this->last_playback_us_ == 0)
+  // Timed from the LAST OF: a packet arriving, and far-end audio actually
+  // reaching the speaker. Those are not the same instant, and using only the
+  // first -- as this did -- is what produced an echo on every word.
+  //
+  // Between play_g711() and the speaker there is a jitter buffer. When the far
+  // end stops, packets stop arriving immediately but the buffer keeps feeding
+  // the speaker, and the room keeps reverberating after that. Lifting the
+  // half-duplex mute `talk_timeout` after the last PACKET therefore reopened
+  // the microphone while the far end's own voice was still audible in the room:
+  // it was captured, encoded, and sent straight back. One echo per word, since
+  // each burst ends the same way.
+  //
+  // Measuring from the end of playback makes talk_timeout mean what its name
+  // says -- how long to stay deaf after the far end has actually finished --
+  // and that is the number that has to cover the room's reverberation.
+  const int64_t last = this->last_playback_us_ > this->last_speaker_write_us_
+                           ? this->last_playback_us_
+                           : this->last_speaker_write_us_;
+  if (last == 0)
     return false;
-  return (esp_timer_get_time() - this->last_playback_us_) < (this->config_.talk_timeout_ms * 1000LL);
+  return (esp_timer_get_time() - last) < (this->config_.talk_timeout_ms * 1000LL);
 }
 
 void AudioPipeline::play_g711(const uint8_t *data, size_t len) {
@@ -780,6 +798,12 @@ void AudioPipeline::playback_run_() {
       previous = sample;
     }
 
+    // Stamped here and nowhere else: this is the one place real far-end audio
+    // goes to the speaker. Not in write_pcm_(), which also carries the test beep
+    // and the loopback monitor -- the monitor is microphone-to-speaker, so
+    // stamping it there would make the loopback mute its own source. Not on the
+    // silence fill above either: silence has no echo to wait out.
+    this->last_speaker_write_us_ = esp_timer_get_time();
     this->write_pcm_(pcm.data(), out_samples);
   }
 
