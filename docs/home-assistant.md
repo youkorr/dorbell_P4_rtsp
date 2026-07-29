@@ -387,18 +387,72 @@ cards:
 
 ### The WebRTC Camera card (AlexxIT)
 
-A simpler alternative with no camera-type restriction:
+A far simpler card, with no camera-type restriction. Install **both** parts from
+HACS — the *WebRTC Camera* **integration**, not only the card. The integration
+provides the WebSocket proxy the card talks to; with the card alone you get a
+permanent "Custom element doesn't exist".
 
 ```yaml
 type: custom:webrtc-camera
-url: doorbell_webrtc
-mode: webrtc
-media: video,audio,microphone
+
+# Frigate's embedded go2rtc -- NOT the one this integration starts on its own.
+# Left out, the integration downloads and runs its own go2rtc, which has never
+# heard of `doorbell_webrtc` and shows an empty card. Point it at the machine
+# running Frigate, port 1984.
+server: http://192.168.1.38:1984/
+
+streams:
+  # 1 - watching. Deliberately WITHOUT `microphone`; see below.
+  - url: doorbell_webrtc
+    name: Watch
+    mode: webrtc
+
+  # 2 - talking. Select it to speak, go back to stream 1 to stop.
+  - url: doorbell_webrtc
+    name: Talk
+    mode: webrtc
+    media: video,audio,microphone
+
+ui: true               # built-in controls, and the stream selector
+muted: false           # you want to hear the visitor
+background: false      # stop the stream when the card is off screen
+intersection: 0.75
+poster: doorbell_webrtc
 ```
 
-`microphone` in `media` is what creates the microphone button. If the Advanced
-Camera Card's microphone stays absent, this card is worth trying — it does not
-impose the Frigate-camera condition.
+#### This card has no push-to-talk button
+
+Worth knowing before choosing it, because it is the one real difference from the
+Advanced Camera Card. From `video-rtc.js`:
+
+```js
+if (this.media.includes('microphone')) {
+    const media = await navigator.mediaDevices.getUserMedia({audio: true});
+```
+
+The microphone is opened **when the stream connects**, not when you press
+anything. A stream carrying `microphone` therefore keeps your microphone live —
+and audible at the doorbell — for as long as that stream is selected.
+
+That is why the config above declares the stream twice. The stream selector *is*
+the talk button: "Watch" by default, "Talk" while you are speaking. It costs one
+click more than a momentary button, and in exchange nothing can leave your
+microphone open by accident.
+
+If you would rather have a real hold-to-talk button, that is the Advanced Camera
+Card's `menu.buttons.microphone.type: momentary`, and the reason to keep it
+despite its heavier configuration.
+
+#### `mode: webrtc` is not optional here either
+
+`mse`, `hls` and `mjpeg` carry no microphone — the code above only runs on the
+WebRTC path. And point `url:` at `doorbell_webrtc`, never at `doorbell`: the
+latter is MJPEG, which WebRTC cannot carry, and it gives the backchannel up with
+`#backchannel=0`.
+
+Everything in [§8](#8-two-way-audio) still applies unchanged: HTTPS is required
+for the browser to hand over a microphone at all, and exactly one go2rtc source
+may hold the backchannel.
 
 ---
 
