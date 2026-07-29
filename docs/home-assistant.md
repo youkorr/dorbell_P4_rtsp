@@ -991,6 +991,7 @@ And on the output side, `Octets audio proposes` versus `acceptes`:
 |---|---|
 | go2rtc cannot connect to the P4 | the IP changed: DHCP reservation, or use the mDNS name (section 1) |
 | WebRTC shows a black screen, and the P4 logs only a `SETUP trackID=1` | go2rtc discarded the JPEG video, which WebRTC cannot carry: the `ffmpeg:…#video=h264` transcode is missing (section 4) |
+| **Video only works when the audio is disabled on the device** | the same missing transcode, seen from the other side. With audio, WebRTC negotiates successfully on the G.711 track alone and the JPEG video is simply left out — sound, no picture. Remove the audio and the negotiation finds nothing it can carry, the viewer falls back to MJPEG, and the picture returns. Nothing is wrong with the doorbell: add the `ffmpeg:…#video=h264` stream and point the card at it (section 4) |
 | `probe` on `doorbell_webrtc` still shows `JPEG` | the ffmpeg transcode is failing — drop `#hardware` if the machine has no VA-API encoder |
 | Port 1984 does not answer | you are aiming at the P4 instead of go2rtc: the P4 only serves RTSP on 8554 |
 | Image fine, then clients refused (`refusing …: already serving 2 clients`) | the MJPEG chain takes 2 RTSP sessions: raise `max_clients` |
@@ -1008,4 +1009,4 @@ And on the output side, `Octets audio proposes` versus `acceptes`:
 | `RTSP: unsupported transport` | a client is forcing UDP; this server is TCP-interleaved only |
 | `Unable to find action with the name 'rtsp_server.…'` | ESPHome is compiling an old copy: wrong `ref:`, or the 24 h cache. Set `refresh: 0s` and delete `.esphome/external_components` |
 | `codec: h264` rejected at compile time | intentional — H.264 was removed, see the README |
-| Audio never starts, and the I2C scan shows no device at `0x40` | the board has no ES7210. `fdaudio` requires one; use ESPHome's `es8311` with `use_microphone: true` instead — see `hardware.md` |
+| Audio never starts, and the I2C scan shows no device at `0x40` | the board has no ES7210, and `fdaudio` looks for one at that address — its failure takes the speaker down too. Set `mic_source: output_codec` to capture through the ES8311's own ADC — see `hardware.md` |
