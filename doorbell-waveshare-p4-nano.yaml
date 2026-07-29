@@ -49,11 +49,21 @@
 #        Nothing past this point can work until the beep does.
 #
 #   5. Watch the "Microphone level" sensor while speaking in front of the board.
-#        -100 dBFS  : digital silence, the ADC delivers zeros.
 #        -60 .. -40 : it hears but faintly -> raise `mic_gain_db`.
 #        -30 ..  -6 : healthy.
+#        -100 dBFS  : digital silence, and the one failure worth planning for.
+#          The ES8311 can listen to EITHER an analog differential microphone
+#          (MIC1P/MIC1N) or a PDM digital one, and it reports no error for the
+#          wrong choice -- it digitises an input nothing is wired to, forever.
+#          Steps 1-4 all pass. So: add `digital_mic: true` to the `fdaudio:`
+#          block and reflash. If it is still silent, put it back and the fault
+#          is upstream of the codec (wiring, or the microphone is on an ES7210
+#          after all -- recheck step 1).
 #        The ES8311's ADC is not the ES7210's: `mic_gain_db: 30` below is a
 #        starting point for this board, not a measured value. Expect to tune it.
+#
+#   Step 5 is the one that has never been confirmed on a board of this kind.
+#   Everything before it has run on real ESP32-P4 hardware.
 # ---------------------------------------------------------------------------
 
 substitutions:
