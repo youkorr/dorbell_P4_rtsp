@@ -98,7 +98,7 @@ streams:
   #      G.711, with no codec round trip
   doorbell_webrtc:
     - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
-    - rtsp://USER:PASS@192.168.1.9:8554/doorbell#backchannel=1
+    - rtsp://USER:PASS@192.168.1.9:8554/doorbell#media=audio#backchannel=1
 
 webrtc:
   listen: ":8555/tcp"
@@ -121,6 +121,7 @@ default off:
 | `rtsp://.../doorbell` | ON (default) |
 | `rtsp://.../doorbell#media=video,audio` | OFF |
 | `rtsp://.../doorbell#backchannel=1` | ON (explicit) |
+| `rtsp://.../doorbell#media=audio#backchannel=1` | ON, and no video requested — **use this for the backchannel source** |
 | `rtsp://.../doorbell#backchannel=0` | OFF (explicit) |
 
 Two sources holding it at once is the single most common cause of "two-way audio
@@ -172,7 +173,7 @@ go2rtc:
       - rtsp://USER:PASS@192.168.1.9:8554/doorbell#backchannel=0
     doorbell_webrtc:
       - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
-      - rtsp://USER:PASS@192.168.1.9:8554/doorbell#backchannel=1
+      - rtsp://USER:PASS@192.168.1.9:8554/doorbell#media=audio#backchannel=1
   webrtc:
     listen: :8555
     candidates:

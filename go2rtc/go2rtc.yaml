@@ -36,6 +36,17 @@ streams:
   # The audio is NOT re-encoded: '#audio=copy' passes G.711 straight through,
   # which is what keeps two-way audio free of a codec round trip.
   #
+  # '#media=audio' on the backchannel source is NOT optional. Without it that
+  # second session pulls the whole MJPEG stream a second time, purely to reach a
+  # track that carries no video at all -- so the device's outbound video DOUBLES
+  # the moment two-way audio is engaged. On a link that was comfortable with one
+  # copy, the transmit ring then overflows and the server drops whole video
+  # frames while the 9 kB/s of audio sails through untouched. The symptom is
+  # "the video stops when the audio works", and it looks like a fault in the
+  # device. go2rtc's own filter (pkg/rtsp/client.go: keep media whose Kind is
+  # named) drops the video track before SETUP, and leaves both audio tracks --
+  # the doorbell's microphone and the sendonly backchannel -- untouched.
+  #
   # This costs TWO client slots on the ESP32-P4, so raise `max_clients` to at
   # least 3 in the ESPHome YAML (the default of 2 leaves no room for VLC or a
   # second viewer).
@@ -55,7 +66,7 @@ streams:
 
   doorbell_webrtc:
     - ffmpeg:doorbell#video=h264#audio=copy
-    - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=1
+    - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#media=audio#backchannel=1
 
   # Optional: for a consumer that must NOT hold the backchannel open, e.g. a
   # recorder or a motion detector running alongside the live view.
