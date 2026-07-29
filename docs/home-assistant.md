@@ -395,12 +395,6 @@ permanent "Custom element doesn't exist".
 ```yaml
 type: custom:webrtc-camera
 
-# Frigate's embedded go2rtc -- NOT the one this integration starts on its own.
-# Left out, the integration downloads and runs its own go2rtc, which has never
-# heard of `doorbell_webrtc` and shows an empty card. Point it at the machine
-# running Frigate, port 1984.
-server: http://192.168.1.38:1984/
-
 streams:
   # 1 - watching. Deliberately WITHOUT `microphone`; see below.
   - url: doorbell_webrtc
@@ -419,6 +413,55 @@ background: false      # stop the stream when the card is off screen
 intersection: 0.75
 poster: doorbell_webrtc
 ```
+
+#### Pointing it at Frigate's go2rtc
+
+Left to itself, the integration downloads and runs **its own** go2rtc — which
+has never heard of `doorbell_webrtc`, so the card comes up empty. It has to use
+Frigate's instead.
+
+Usually it works this out by itself. Its config flow probes, in order:
+
+```python
+tests = await asyncio.gather(
+    utils.check_go2rtc(self.hass),                                  # http://localhost:1984/
+    utils.check_go2rtc(self.hass, "http://ccab4aaf-frigate:1984"),
+    utils.check_go2rtc(self.hass, "http://ccab4aaf-frigate-fa:1984"),
+    utils.check_go2rtc(self.hass, "http://ccab4aaf-frigate-beta:1984"),
+)
+```
+
+Those are the Frigate add-on's internal hostnames. If it found one at setup, you
+need no `server:` on the card at all.
+
+If it did not, set it — on the card as `server:`, or in the integration's
+options — to the hostname matching your add-on:
+
+| Add-on | `server:` |
+|---|---|
+| Frigate NVR | `http://ccab4aaf-frigate:1984` |
+| Frigate NVR (Full Access) | `http://ccab4aaf-frigate-fa:1984` |
+| Frigate NVR Beta | `http://ccab4aaf-frigate-beta:1984` |
+| Frigate in your own Docker/LAN | `http://<ip>:1984/` |
+
+Read the slug off the add-on's own URL: `/ccab4aaf_frigate` in the address bar
+is the plain *Frigate NVR* add-on, so `ccab4aaf-frigate` — **underscores become
+hyphens** in the hostname.
+
+Two mistakes worth naming, because both look reasonable:
+
+- **Not the add-on's web address.** `https://homeassistant.example/ccab4aaf_frigate`
+  is Home Assistant's ingress: an authenticated, path-rewriting proxy to
+  Frigate's own UI on port 5000. It is not the go2rtc API and cannot stand in
+  for it.
+- **The LAN IP is the fallback, not the first choice.** An add-on does not
+  publish port 1984 on the LAN unless you add it under the add-on's
+  *Configuration → Network*. The internal hostname needs no such thing.
+
+The name is resolved by the **Home Assistant backend**, in Python —
+`check_go2rtc()` uses `async_get_clientsession(hass)` — never by the browser. So
+a Docker-internal hostname is exactly right here, and no HTTPS or mixed-content
+question arises for this particular URL.
 
 #### This card has no push-to-talk button
 
