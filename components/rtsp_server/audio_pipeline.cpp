@@ -633,6 +633,33 @@ bool AudioPipeline::is_talking() const {
   return (esp_timer_get_time() - last) < (this->config_.talk_timeout_ms * 1000LL);
 }
 
+bool AudioPipeline::far_end_speaking_() const {
+  // A DIFFERENT question from is_talking(), and the distinction decides whether
+  // two-way audio works at all.
+  //
+  // is_talking() answers "is a call in progress" -- packets are flowing. That is
+  // the right question for the talk triggers, for keeping the speaker fed with
+  // silence, and for arbitrating the loopback monitor.
+  //
+  // It is the WRONG question for muting the microphone, and half-duplex used it.
+  // G.711 has no silence suppression: a client that holds its microphone open
+  // sends a continuous stream whether or not anyone is speaking. The WebRTC
+  // Camera card does exactly that -- getUserMedia runs when the stream
+  // connects, not on a button -- so packets never stop, is_talking() never goes
+  // false, and the doorbell's microphone stayed muted for the whole call. The
+  // visitor could not be heard at all.
+  //
+  // So mute on what is AUDIBLE instead: the far end has to have actually made a
+  // sound above FAR_END_SPEAKING_PEAK recently. Room noise under an open
+  // microphone sits below it; speech does not. talk_timeout_ms keeps its
+  // meaning, now counted from the last audible moment rather than the last
+  // packet, so it is still the room's reverberation time.
+  if (this->last_loud_playback_us_ == 0)
+    return false;
+  return (esp_timer_get_time() - this->last_loud_playback_us_) <
+         (this->config_.talk_timeout_ms * 1000LL);
+}
+
 void AudioPipeline::play_g711(const uint8_t *data, size_t len) {
   if (this->playback_buffer_ == nullptr || !this->has_speaker() || len == 0)
     return;
@@ -673,7 +700,7 @@ void AudioPipeline::capture_run_() {
     this->mic_samples_ += static_cast<uint32_t>(got);
     this->mic_last_sample_us_ = esp_timer_get_time();
 
-    const bool muted = this->config_.half_duplex && this->is_talking();
+    const bool muted = this->config_.half_duplex && this->far_end_speaking_();
 
     size_t out_count = 0;
     for (size_t i = 0; i + decimation <= got; i += decimation) {
@@ -803,7 +830,22 @@ void AudioPipeline::playback_run_() {
     // and the loopback monitor -- the monitor is microphone-to-speaker, so
     // stamping it there would make the loopback mute its own source. Not on the
     // silence fill above either: silence has no echo to wait out.
-    this->last_speaker_write_us_ = esp_timer_get_time();
+    const int64_t now_us = esp_timer_get_time();
+    this->last_speaker_write_us_ = now_us;
+
+    // And separately: was any of it actually AUDIBLE? See far_end_speaking_().
+    // A caller holding an open microphone sends packets continuously, so
+    // "audio arrived" and "someone spoke" are different facts and the
+    // half-duplex mute needs the second one.
+    int32_t peak = 0;
+    for (size_t i = 0; i < out_samples; i++) {
+      const int32_t a = pcm[i] < 0 ? -pcm[i] : pcm[i];
+      if (a > peak)
+        peak = a;
+    }
+    if (peak > FAR_END_SPEAKING_PEAK)
+      this->last_loud_playback_us_ = now_us;
+
     this->write_pcm_(pcm.data(), out_samples);
   }
 

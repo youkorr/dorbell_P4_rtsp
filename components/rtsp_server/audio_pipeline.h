@@ -77,9 +77,9 @@ class AudioPipeline {
     /// Mute the microphone while the far end is talking, to stop the speaker
     /// from feeding back into the microphone. There is no echo canceller.
     bool half_duplex{true};
-    /// How long the microphone stays muted after the far end's audio has
-    /// actually finished coming out of the speaker -- not after the last packet
-    /// arrived, which is a jitter buffer earlier.
+    /// How long the microphone stays muted after the far end was last
+    /// AUDIBLE -- not after the last packet arrived, which is both a jitter
+    /// buffer earlier and, for a client holding its microphone open, never.
     ///
     /// This is the room's reverberation time, nothing else. Too short and the
     /// microphone reopens while the far end's own voice is still ringing in the
@@ -113,7 +113,8 @@ class AudioPipeline {
 
   bool is_running() const { return this->running_; }
   bool has_speaker() const { return this->tx_handle_ != nullptr || this->external_speaker_ != nullptr; }
-  /// True while backchannel audio is actively being played.
+  /// A call is in progress: backchannel packets are flowing. Drives the talk
+  /// triggers, the speaker's silence fill and the loopback arbitration.
   bool is_talking() const;
   uint32_t packets_sent() const { return this->packets_sent_; }
   uint32_t packets_received() const { return this->packets_received_; }
@@ -204,6 +205,10 @@ class AudioPipeline {
   size_t read_pcm_(int16_t *dst, size_t samples);
   /// Push 16-bit mono samples to whichever sink is active.
   void write_pcm_(const int16_t *src, size_t samples);
+  /// The far end is actually making a sound right now. This -- not
+  /// is_talking() -- is what the half-duplex mute must use, because a client
+  /// that holds its microphone open sends packets whether anyone speaks or not.
+  bool far_end_speaking_() const;
   void on_external_mic_data_(const std::vector<uint8_t> &data);
 
   /// Record the peak of a PCM block into a decaying meter. Returns that block's
@@ -248,6 +253,14 @@ class AudioPipeline {
   /// When far-end audio was last actually handed to the speaker. Later than the
   /// above by the depth of the jitter buffer; see is_talking().
   volatile int64_t last_speaker_write_us_{0};
+  /// When the far end was last actually AUDIBLE, as opposed to merely
+  /// connected. Drives the half-duplex mute; see far_end_speaking_().
+  volatile int64_t last_loud_playback_us_{0};
+
+  /// Peak sample above which the far end counts as speaking rather than as an
+  /// open microphone in a quiet room. ~ -30 dBFS: comfortably above the room
+  /// noise a phone picks up, comfortably below speech.
+  static constexpr int32_t FAR_END_SPEAKING_PEAK = 1000;
 
   volatile uint32_t packets_sent_{0};
   volatile uint32_t packets_received_{0};

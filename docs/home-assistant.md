@@ -482,6 +482,24 @@ the talk button: "Watch" by default, "Talk" while you are speaking. It costs one
 click more than a momentary button, and in exchange nothing can leave your
 microphone open by accident.
 
+It is now a **privacy** choice rather than a functional one. A single stream
+with `media: video,audio,microphone` works as a normal intercom — you hear the
+visitor, the visitor hears you, no switching:
+
+```yaml
+type: custom:webrtc-camera
+url: doorbell_webrtc
+mode: webrtc
+media: video,audio,microphone
+```
+
+That only became true once `half_duplex` stopped muting the doorbell on "audio
+is arriving" and started muting on "the far end is audible" — see
+[§8](#8-two-way-audio). Before that, an always-open microphone kept the
+doorbell deaf for the whole call, and the two-stream form was the only way to
+hear anything. Take the two-stream form if you would rather your microphone not
+be live whenever the card is on screen; take the four lines above otherwise.
+
 ##### If no selector appears
 
 It has two conditions, and both must hold:
@@ -531,6 +549,27 @@ may hold the backchannel.
 Talking *to* the visitor is the hardest part of this chain. Listening works with
 no special effort — the stream carries audio continuously, which also means the
 microphone is live whenever anything is watching.
+
+### `half_duplex` mutes on sound, not on packets
+
+There being no echo canceller, `half_duplex: true` silences the doorbell's
+microphone while the far end is talking. The question is how it knows.
+
+Not from packets arriving. G.711 has no silence suppression, so a client that
+holds its microphone open sends a continuous stream whether or not anybody is
+speaking — and the WebRTC Camera card does precisely that, opening
+`getUserMedia` when the stream connects rather than on a button. Muting on
+"audio is arriving" therefore muted the doorbell for the entire call: you could
+talk to the visitor and never hear a word back, with every level meter healthy
+and nothing in the logs.
+
+So the mute triggers on the far end being **audible** — a decoded peak above
+roughly −30 dBFS — with `talk_timeout` as the hangover after it. Room noise
+under an open microphone sits below that; speech does not.
+
+The practical consequence: an always-on microphone is fine now. Push-to-talk
+still costs nothing and is still the better choice on a speakerphone, but it is
+no longer the only arrangement that works.
 
 ### HTTPS is not optional
 
