@@ -19,9 +19,16 @@
 # the SPEAKER down with the microphone and the board produces no audio at all.
 # `mic_source: output_codec` below is what avoids that.
 #
-# The pin numbers here come from the NANO's published pinout, not from a board
-# in hand. If something does not come up, the schematic is the arbiter: audio on
-# GPIO9-13, SDIO to the C6 on GPIO14-19 + GPIO54, amplifier enable on GPIO53.
+# The pin numbers below are corroborated by four independent projects running on
+# this board -- an ESP-IDF I2S/ES8311 demo, an AES67 audio node, a metronome, and
+# another ESPHome config -- which agree on:
+#
+#   I2C  SCL=GPIO8  SDA=GPIO7   (ES8311 at 0x18)
+#   I2S  MCLK=GPIO13 BCLK=GPIO12 WS=GPIO10 DOUT=GPIO9 DIN=GPIO11
+#   PA_CTRL (speaker amplifier enable) = GPIO53, active high
+#
+# Still no board in hand here, so the schematic remains the arbiter if something
+# does not come up.
 #
 # ---------------------------------------------------------------------------
 # FIRST BOOT: five checks, in this order. Each isolates ONE thing, so the first
@@ -51,19 +58,19 @@
 #   5. Watch the "Microphone level" sensor while speaking in front of the board.
 #        -60 .. -40 : it hears but faintly -> raise `mic_gain_db`.
 #        -30 ..  -6 : healthy.
-#        -100 dBFS  : digital silence, and the one failure worth planning for.
-#          The ES8311 can listen to EITHER an analog differential microphone
-#          (MIC1P/MIC1N) or a PDM digital one, and it reports no error for the
-#          wrong choice -- it digitises an input nothing is wired to, forever.
-#          Steps 1-4 all pass. So: add `digital_mic: true` to the `fdaudio:`
-#          block and reflash. If it is still silent, put it back and the fault
-#          is upstream of the codec (wiring, or the microphone is on an ES7210
-#          after all -- recheck step 1).
-#        The ES8311's ADC is not the ES7210's: `mic_gain_db: 30` below is a
-#        starting point for this board, not a measured value. Expect to tune it.
+#        -100 dBFS  : digital silence. Look at the wiring, not at `digital_mic`.
+#          The ES8311 listens to EITHER an analog differential microphone
+#          (MIC1P/MIC1N) or a PDM digital one, reports no error for the wrong
+#          choice, and lets steps 1-4 pass either way -- so it is a tempting
+#          suspect. On THIS board it is not: the reference ES8311 demo for the
+#          NANO calls es8311_microphone_config(handle, false), i.e. analog, and
+#          `digital_mic` already defaults to false. Only reach for
+#          `digital_mic: true` on some other ES8311 board that stays silent.
 #
-#   Step 5 is the one that has never been confirmed on a board of this kind.
-#   Everything before it has run on real ESP32-P4 hardware.
+#   Step 5 is the one that has never been confirmed on this board: the ES8311's
+#   own ADC as the capture device. Testing it on a board that HAS an ES7210
+#   proves nothing -- there the microphone is wired to the ES7210 and the
+#   ES8311's analog input goes nowhere, so it correctly records silence.
 # ---------------------------------------------------------------------------
 
 substitutions:
@@ -230,10 +237,12 @@ fdaudio:
   # 0x40, which this board does not have. `mic_address` is unused in this mode.
   mic_source: output_codec
 
-  # The ES8311's ADC gain, in dB (0 - 42). The doorbell measurement on the
-  # reference board showed the microphone arriving far too quiet, so start high
-  # and trim down: it is cheaper here, before the converter, than downstream.
-  mic_gain_db: 30
+  # The ES8311's ADC gain, in dB (0 - 42; the driver quantises to the chip's
+  # 6 dB steps). 42 is the top of the range and what another ESPHome config for
+  # this same board settles on -- and the doorbell measurement on the reference
+  # board showed the microphone arriving far too quiet anyway. Start at the top
+  # and trim down: gain is cheaper here, before the converter, than downstream.
+  mic_gain_db: 42
   output_volume: 70
   sample_rate: 16000
   enable_aec: false
