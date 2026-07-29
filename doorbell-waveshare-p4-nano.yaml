@@ -52,7 +52,16 @@ esp32:
     sdkconfig_options:
       CONFIG_COMPILER_OPTIMIZATION_PERF: y
       CONFIG_SPIRAM_XIP_FROM_PSRAM: y
-      CONFIG_GDMA_ISR_IRAM_SAFE: y
+      # CONFIG_GDMA_ISR_IRAM_SAFE is deliberately ABSENT. Setting it breaks the
+      # audio outright: it forces every GDMA channel's ISR to be cache-safe,
+      # which makes the I2S driver require its channel handle to sit in internal
+      # RAM -- and without CONFIG_I2S_ISR_IRAM_SAFE that handle is allocated with
+      # MALLOC_CAP_DEFAULT, so it can land in PSRAM. i2s_channel_init_std_mode()
+      # then fails with ESP_ERR_INVALID_ARG and the board makes no sound at all.
+      # ESP-IDF calls the option a backward-compatibility switch and leaves it
+      # off by default; keep it off. If you really need it, add
+      # CONFIG_I2S_ISR_IRAM_SAFE: y alongside -- it costs IRAM that LVGL and the
+      # camera want.
       CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
       CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
       CONFIG_SPIRAM_RODATA: "n"
