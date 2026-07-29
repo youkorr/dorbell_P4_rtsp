@@ -482,6 +482,33 @@ the talk button: "Watch" by default, "Talk" while you are speaking. It costs one
 click more than a momentary button, and in exchange nothing can leave your
 microphone open by accident.
 
+##### If no selector appears
+
+It has two conditions, and both must hold:
+
+```js
+stream.style.display = this.config.streams.length > 1 ? 'block' : 'none';
+```
+
+…inside `renderCustomUI()`, which only runs when `config.ui` is true. So:
+
+1. **`ui: true`** — without it the custom control bar is never built.
+2. **`streams:` with two entries.** `url:` and `streams:` are alternatives, and
+   `url:` yields a single stream, so `length > 1` is false and the control stays
+   hidden. A card that shows the picture perfectly with `url: doorbell_webrtc`
+   will never show a selector: it has nothing to select between.
+
+There is also a control that does **not** depend on `ui:` — the small
+semi-transparent mode label in the top-right corner of the picture:
+
+```js
+const mode = this.querySelector('.mode');
+mode.addEventListener('click', () => this.nextStream(true));
+```
+
+Clicking it cycles streams too. Handy for checking the `streams:` list is being
+read at all: if that label does not cycle, the config never reached the card.
+
 If you would rather have a real hold-to-talk button, that is the Advanced Camera
 Card's `menu.buttons.microphone.type: momentary`, and the reason to keep it
 despite its heavier configuration.
