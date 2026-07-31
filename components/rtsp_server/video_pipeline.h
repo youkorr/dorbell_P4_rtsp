@@ -44,7 +44,7 @@ class VideoPipeline {
     std::string device{"/dev/video0"};
     uint32_t framerate{15};
     uint8_t jpeg_quality{25};
-    uint8_t buffer_count{3};
+    uint8_t buffer_count{2};
     bool vflip{false};
     bool hflip{false};
     /// When a camera component is shared with LVGL, only one consumer may drive
