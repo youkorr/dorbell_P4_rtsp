@@ -1003,6 +1003,7 @@ And on the output side, `Octets audio proposes` versus `acceptes`:
 | Image fine, no upstream sound | no `microphone` in `media` (webrtc-camera) |
 | The sound cuts out when you talk | expected: `half_duplex: true` mutes the microphone while the far end speaks |
 | Howling | the loopback monitor is on, or the amplifier stays powered — see `hardware.md` |
+| Frames lost at a higher resolution, fine at a lower one (`tx: N packets, M frames dropped` climbing in the status block) | the transmit ring cannot hold a frame of that size. A 1080p JPEG runs 100–150 kB against 40–60 kB at 960p, and an oversized frame is dropped **whole** rather than torn. Raise `tx_buffer_size` to roughly two frames — `512kB` for 1080p — and add `tx_buffer_psram: true` so it does not come out of internal RAM |
 | Smooth image but high CPU on the HA machine | the MJPEG → H.264 transcode, unavoidable for WebRTC. Lower `framerate` or `jpeg_quality`, or watch in `mjpeg`/`mse` mode |
 | No image in the card, but `doorbell` visible in go2rtc | the card points at `doorbell`; use `doorbell_webrtc` |
 | The image freezes while the stream is active | the LVGL preview was switched off without handing the V4L2 dequeue back — see `set_drive_camera()` |

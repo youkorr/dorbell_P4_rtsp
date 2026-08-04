@@ -35,12 +35,14 @@ screen, so the same frame feeds a local preview and the network stream.
 - **go2rtc**, standalone or inside Frigate, to republish the stream as WebRTC;
 - ESPHome 2025.5 or newer.
 
-> **Check your board's I2C scan before copying an audio block.** The example
-> configs use `fdaudio`, which needs an **ES7210** microphone ADC at `0x40`.
-> Several ESP32-P4 boards — the Waveshare ESP32-P4-NANO among them — ship only
-> the ES8311 at `0x18` and take the microphone through the codec's own ADC. On
-> those, use ESPHome's stock `es8311` component with `use_microphone: true`;
-> [`docs/hardware.md`](docs/hardware.md) gives the replacement block.
+> **Check your board's I2C scan before copying an audio block.** By default
+> `fdaudio` looks for an **ES7210** microphone ADC at `0x40`, and its absence
+> takes the speaker down with the microphone — the board then makes no sound at
+> all. Several ESP32-P4 boards — the Waveshare ESP32-P4-NANO among them — ship
+> only the ES8311 at `0x18` and wire the microphone into that codec's own ADC.
+> On those, set `mic_source: output_codec`; see
+> [`docs/hardware.md`](docs/hardware.md) and
+> [`doorbell-waveshare-p4-nano.yaml`](doorbell-waveshare-p4-nano.yaml).
 
 ## Quick start
 
@@ -128,6 +130,8 @@ I2C bus scan ESPHome prints at boot.
 | `username` / `password` | — | Basic authentication; omit both for an open stream |
 | `max_clients` | `2` | simultaneous RTSP connections |
 | `packet_size` | `1400` | maximum RTP packet size |
+| `tx_buffer_size` | `192kB` | transmit ring. **The practical ceiling on resolution** — see below |
+| `tx_buffer_psram` | `false` | put that ring in PSRAM instead of internal RAM |
 | `backchannel` | `auto` | `auto` announces the `sendonly` track only to a client that sends the ONVIF `Require` header; `always` announces it to everyone |
 
 **Set `backchannel: always` if you want a talk button in Home Assistant.**
@@ -166,7 +170,7 @@ components open `/dev/video0` independently and fight over it.
 | `gain` | `4.0` | digital gain applied after the codec, 0.1 – 256 |
 | `volume` | `0.8` | digital attenuation on playback, 0.0 – 1.0 |
 | `half_duplex` | `true` | mute the microphone while the far end is talking |
-| `talk_timeout` | `300ms` | silence after which the call is considered over |
+| `talk_timeout` | `500ms` | how long the microphone stays muted after the far end was last audible — effectively the room's reverberation time |
 | `microphone.mode` | `std` | `std` (classic I2S) or `pdm` |
 | `microphone.bits_per_sample` | `32` | 32 for an INMP441/ICS-43434 |
 | `microphone.channel` | `left` | I2S slot; `left` = L/R pin tied to ground |

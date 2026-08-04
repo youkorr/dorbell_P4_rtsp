@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "esphome/components/network/util.h"
 #include "esphome/core/hal.h"
@@ -28,9 +29,6 @@ namespace rtsp_server {
 static const char *const TAG = "rtsp_server";
 static const char *const SERVER_NAME = "ESPHome-RTSP/1.0 (ESP32-P4)";
 
-/// Holds roughly one large key frame plus a margin, so a burst of packets can
-/// be queued while the network task is busy writing an earlier one.
-static constexpr size_t TX_RING_BYTES = 192 * 1024;
 static constexpr int SELECT_TIMEOUT_MS = 5;
 static constexpr uint32_t SESSION_TIMEOUT_MS = 120000;
 
@@ -109,13 +107,28 @@ void RTSPServer::set_credentials(const std::string &user, const std::string &pas
 }
 
 void RTSPServer::setup() {
-  this->tx_ring_ = xRingbufferCreate(TX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+  // The transmit ring is what absorbs the gap between an encoder producing a
+  // whole JPEG at once and a TCP link draining it steadily. Too small and
+  // send_rtp() drops entire frames the moment a frame outruns the link, which
+  // is the ceiling on resolution long before the encoder or the sensor is.
+  //
+  // Hence: sized from YAML, and optionally out of PSRAM. Internal RAM is the
+  // scarce resource on a board also running a camera and a display, while PSRAM
+  // usually sits nearly empty -- and this buffer is streamed through, never
+  // random-accessed, so the slower memory costs nothing that matters.
+  const uint32_t caps = MALLOC_CAP_8BIT | (this->tx_ring_psram_ ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+  this->tx_ring_ = xRingbufferCreateWithCaps(this->tx_ring_bytes_, RINGBUF_TYPE_NOSPLIT, caps);
   if (this->tx_ring_ == nullptr) {
-    ESP_LOGE(TAG, "failed to allocate the %u KiB transmit ring buffer",
-             static_cast<unsigned>(TX_RING_BYTES / 1024));
+    ESP_LOGE(TAG,
+             "failed to allocate the %u KiB transmit ring buffer in %s. Lower 'tx_buffer_size', or set "
+             "'tx_buffer_psram: true' to take it out of PSRAM instead (%u KiB free there).",
+             static_cast<unsigned>(this->tx_ring_bytes_ / 1024), this->tx_ring_psram_ ? "PSRAM" : "internal RAM",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     this->mark_failed();
     return;
   }
+  ESP_LOGCONFIG(TAG, "transmit ring buffer: %u KiB in %s", static_cast<unsigned>(this->tx_ring_bytes_ / 1024),
+                this->tx_ring_psram_ ? "PSRAM" : "internal RAM");
 
   // RFC 2435 assigns JPEG the static payload type 26.
   this->mjpeg_packetizer_ = make_unique<MjpegPacketizer>(this->packet_size_, 26, random_uint32());

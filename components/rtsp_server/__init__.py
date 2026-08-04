@@ -50,6 +50,8 @@ CONF_PATH = "path"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
 CONF_MAX_CLIENTS = "max_clients"
+CONF_TX_BUFFER_SIZE = "tx_buffer_size"
+CONF_TX_BUFFER_PSRAM = "tx_buffer_psram"
 CONF_PACKET_SIZE = "packet_size"
 CONF_BACKCHANNEL = "backchannel"
 
@@ -321,6 +323,28 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_USERNAME): cv.string,
             cv.Optional(CONF_PASSWORD): cv.string,
             cv.Optional(CONF_MAX_CLIENTS, default=2): cv.int_range(min=1, max=4),
+            # Size of the transmit ring, and where it lives.
+            #
+            # This is the real ceiling on resolution. An encoder hands over a
+            # whole JPEG at once; TCP drains it steadily. The ring absorbs the
+            # difference, and when a frame outruns it send_rtp() drops that
+            # frame ENTIRE -- deliberately, since a JPEG missing a fragment from
+            # its middle paints parts of two frames at once. So a buffer that is
+            # merely adequate at 960p is not adequate at 1080p, and the symptom
+            # is lost frames rather than a worse picture.
+            #
+            # Rule of thumb: two full frames. At jpeg_quality 25 a 1080p frame
+            # runs 100-150 kB, so 512kB is a sensible starting point there
+            # against 192kB for 960p.
+            #
+            # `tx_buffer_psram: true` moves it to PSRAM, which is usually the
+            # memory you have to spare on a board also running a camera and a
+            # display. The buffer is streamed through, never random-accessed, so
+            # the slower memory costs nothing that matters here.
+            cv.Optional(CONF_TX_BUFFER_SIZE, default="192kB"): cv.All(
+                cv.validate_bytes, cv.int_range(min=32 * 1024, max=8 * 1024 * 1024)
+            ),
+            cv.Optional(CONF_TX_BUFFER_PSRAM, default=False): cv.boolean,
             cv.Optional(CONF_PACKET_SIZE, default=1400): cv.int_range(min=512, max=1460),
             cv.Optional(CONF_BACKCHANNEL, default="auto"): cv.enum(BACKCHANNEL_MODES, lower=True),
             cv.Optional(CONF_VIDEO, default={}): VIDEO_SCHEMA,
@@ -410,6 +434,7 @@ async def to_code(config):
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_path(config[CONF_PATH]))
     cg.add(var.set_max_clients(config[CONF_MAX_CLIENTS]))
+    cg.add(var.set_tx_buffer(config[CONF_TX_BUFFER_SIZE], config[CONF_TX_BUFFER_PSRAM]))
     cg.add(var.set_packet_size(config[CONF_PACKET_SIZE]))
     cg.add(var.set_always_advertise_backchannel(BACKCHANNEL_MODES[_selected(config[CONF_BACKCHANNEL])]))
 

@@ -56,6 +56,10 @@ class RTSPServer : public Component, public RtpSender {
   void set_path(const std::string &path) { this->path_ = path; }
   void set_credentials(const std::string &user, const std::string &password);
   void set_max_clients(uint8_t max_clients) { this->max_clients_ = max_clients; }
+  void set_tx_buffer(size_t bytes, bool psram) {
+    this->tx_ring_bytes_ = bytes;
+    this->tx_ring_psram_ = psram;
+  }
   /// When true, the `sendonly` backchannel track is announced in every SDP,
   /// even to a client that did not send the ONVIF `Require` header.
   ///
@@ -183,6 +187,11 @@ class RTSPServer : public Component, public RtpSender {
   std::string path_{"/doorbell"};
   std::string auth_token_;  ///< pre-computed "Basic <base64>" value, empty = open
   uint8_t max_clients_{2};
+  /// Size of the transmit ring, and where it lives. See setup(): this is the
+  /// real ceiling on resolution, since a frame that outruns the link is dropped
+  /// whole rather than torn.
+  size_t tx_ring_bytes_{192 * 1024};
+  bool tx_ring_psram_{false};
   uint16_t packet_size_{1400};
   bool always_advertise_backchannel_{false};
 
