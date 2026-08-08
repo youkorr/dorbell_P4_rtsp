@@ -11,12 +11,12 @@
 
 substitutions:
   name: doorbell-p4
-  friendly_name: Sonnette
+  friendly_name: Doorbell
 
 esphome:
   name: ${name}
   friendly_name: ${friendly_name}
-  min_version: 2025.5.0
+
 
 esp32:
   variant: esp32p4
@@ -40,6 +40,10 @@ esp32:
       # The RTSP task pushes RTP straight into lwIP; give it room to breathe.
       CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
       CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
+      CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
+      CONFIG_WIFI_RMT_AMPDU_TX_ENABLED: "y"
+      CONFIG_WIFI_RMT_TX_BA_WIN: "32"
+
 
 # NOTE: `rtsp_server` currently lives on the working branch below. Replace both
 # `ref:` values with `main` once the PR is merged.
@@ -114,10 +118,8 @@ update:
 # Camera
 # ---------------------------------------------------------------------------
 
-# SCCB/I2C bus the sensor is configured over. Shared with esp_video so there is
-# no second driver fighting for the bus.
 i2c:
-  - id: cam_i2c
+  - id: bsp_bus
     sda: GPIO7
     scl: GPIO8
     frequency: 100kHz
@@ -125,7 +127,7 @@ i2c:
 
 esp_video:
   id: video
-  i2c_id: cam_i2c
+  i2c_id: bsp_bus
   xclk_pin: GPIO36 # -1 if your board has its own 24 MHz oscillator
   xclk_freq: 24000000
   enable_isp: true # RAW -> RGB565 conversion, feeds the JPEG encoder
@@ -162,30 +164,12 @@ rtsp_server:
     jpeg_quality: 25 # 1..100; ~25 keeps a frame around 40-60 kB
 
   audio:
-    codec: pcmu # G.711 µ-law: no transcoding anywhere in the chain
-    sample_rate: 16000 # I2S clock; the wire is always 8 kHz
-
-    microphone: # INMP441 / ICS-43434
-      mode: std
-      i2s_port: 0
-      bclk_pin: GPIO20
-      lrclk_pin: GPIO21
-      din_pin: GPIO22
-      bits_per_sample: 32
-      channel: left # L/R pin tied to GND
-      gain: 6.0
-
-    speaker: # MAX98357A
-      i2s_port: 1
-      bclk_pin: GPIO23
-      lrclk_pin: GPIO26
-      dout_pin: GPIO27
-      bits_per_sample: 16
-      channel: left
-      volume: 0.8
-
-    # There is no acoustic echo canceller: mute the microphone while the far
-    # end is talking so the speaker cannot loop back into it.
+    codec: pcmu
+    sample_rate: 16000
+    microphone_id: board_microphone
+    speaker_id: board_speaker
+    gain: 6.0
+    volume: 0.8
     half_duplex: true
     # Time the microphone stays muted AFTER the far end's voice has finished
     # leaving the speaker -- so, in practice, the room's reverberation time.
@@ -194,6 +178,36 @@ rtsp_server:
     # 800ms in a bare, hard-walled stairwell; the cost is how fast the visitor
     # can interrupt.
     talk_timeout: 500ms
+
+fdaudio:
+  id: audio_engine
+  lrclk_pin: GPIO10
+  bclk_pin: GPIO12
+  mclk_pin: GPIO13
+  din_pin: GPIO11
+  dout_pin: GPIO9
+  i2c_port: 0
+  output_codec: es8311
+  output_address: 0x18
+  mic_address: 0x40
+  mic_gain_db: 30
+  output_volume: 70
+  sample_rate: 16000
+  enable_aec: false      
+  mic_digital_gain: 1.0     # 
+  mic_agc: 0          # 
+  echo_suppression: 0
+  noise_gate: 0         #
+
+microphone:
+  - platform: fdaudio
+    id: board_microphone
+    fdaudio_id: audio_engine
+
+speaker:
+  - platform: fdaudio
+    id: board_speaker
+    fdaudio_id: audio_engine
 
   on_talk_start:
     - switch.turn_on: amp_enable
