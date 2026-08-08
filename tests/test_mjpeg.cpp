@@ -133,6 +133,34 @@ int main(int argc, char **argv) {
     printf("padded encoder output trimmed at the first EOI (%zu pkts, scan %zu B)\n", a.pkts.size(), ref.scan_len);
   }
 
+  // --- invariant relied upon by RTSPServer::send_rtp ------------------------
+  // Frame-aligned dropping decides where a video frame ends by reading the RTP
+  // marker at buf[INTERLEAVED_HEADER_SIZE + 1], on the buffer exactly as handed
+  // to send_rtp -- header included, which the collector above strips. If that
+  // offset moved, or if the packetizer stopped marking its last fragment, the
+  // server would resume mid-frame after an overflow and paint parts of two
+  // pictures at once: the "torn image" fault this policy exists to prevent.
+  {
+    struct RawCollector : RtpSender {
+      std::vector<std::vector<uint8_t>> pkts;
+      void send_rtp(StreamKind, uint8_t *buf, size_t n) override {
+        pkts.push_back(std::vector<uint8_t>(buf, buf + INTERLEAVED_HEADER_SIZE + n));
+      }
+    };
+
+    auto jpg = load(path("f420.jpg").c_str());
+    RawCollector rc;
+    MjpegPacketizer p(600, 26, 7);  // small MTU, so one frame really fragments
+    assert(p.packetize(jpg.data(), jpg.size(), 0, &rc));
+    assert(rc.pkts.size() > 1);  // must actually fragment, or this proves nothing
+    for (size_t i = 0; i < rc.pkts.size(); i++) {
+      const bool marker = (rc.pkts[i][INTERLEAVED_HEADER_SIZE + 1] & 0x80) != 0;
+      assert(marker == (i + 1 == rc.pkts.size()));
+    }
+    printf("frame-end marker at buf[%zu] (%zu frags, only the last marked)\n",
+           static_cast<size_t>(INTERLEAVED_HEADER_SIZE) + 1, rc.pkts.size());
+  }
+
   // Garbage must not crash or emit.
   std::vector<uint8_t> junk(500, 0xAB);
   assert(!parse_jpeg(junk.data(), junk.size()).valid);

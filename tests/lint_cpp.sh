@@ -64,6 +64,60 @@ else
   echo "  OK   no lambda returns a const char* ternary"
 fi
 
+# Every `id(<rtsp_server>).foo()` in an example lambda is compiled into
+# main.cpp, so a method that does not exist -- or one that was renamed in the
+# component -- breaks the user's build, not ours, and nothing here would have
+# said so. Check the call sites against the public API of rtsp_server.h.
+if python3 - "$SRC/rtsp_server.h" <<'PY'
+import glob, re, sys
+
+header = open(sys.argv[1]).read()
+public = header.split("class RTSPServer", 1)[1]
+# Everything from `public:` up to the first `protected:` is the callable API.
+public = public.split("public:", 1)[1].split("protected:", 1)[0]
+known = set(re.findall(r"\b(\w+)\s*\(", public))
+
+bad = False
+for path in sorted(glob.glob("*.yaml")):
+    text = open(path).read()
+    ids = set(re.findall(r"^\s*id:\s*(\w+)\s*$", text, re.M))
+    # Only judge calls on an id the same file declares as an rtsp_server; ids
+    # belonging to other components (camera_display, switches...) are not ours.
+    calls = [(v, m) for v, m in re.findall(r"id\((\w+)\)\.(\w+)\s*\(", text)
+             if v in ids and v == "doorbell_stream"]
+    missing = [(v, m) for v, m in calls if m not in known]
+    for var, method in missing:
+        print(f"  FAILED: {path}: id({var}).{method}() is not a public method of RTSPServer")
+    if missing:
+        bad = True
+    else:
+        print(f"  OK   {path}: {len(calls)} rtsp_server calls all resolve")
+sys.exit(1 if bad else 0)
+PY
+then :; else fail=1; fi
+
+# Every fenced yaml block in the docs is there to be copy-pasted. One that does
+# not parse costs the reader more time than no example at all -- the automation
+# snippet in home-assistant.md was invalid for exactly this reason.
+if python3 - <<'PYEOF'
+import glob, re, sys, yaml
+
+bad = 0
+fence = "```" + "yaml"
+for path in sorted(glob.glob("*.md") + glob.glob("docs/*.md")):
+    blocks = re.findall(fence + r"\n(.*?)" + "```", open(path).read(), re.S)
+    for n, block in enumerate(blocks, 1):
+        try:
+            yaml.safe_load(block)
+        except Exception as e:
+            bad += 1
+            print(f"  FAILED: {path}: yaml block {n}: {str(e).splitlines()[0]}")
+    if blocks:
+        print(f"  OK   {path}: {len(blocks)} yaml blocks parse")
+sys.exit(1 if bad else 0)
+PYEOF
+then :; else fail=1; fi
+
 echo
 echo "== YAML pins =="
 # A GPIO claimed twice in one config is accepted by every check above and only
@@ -107,6 +161,24 @@ for f in "$SRC"/*.cpp; do
     echo "FAILED"; echo "$out" | head -30; fail=1
   fi
 done
+
+echo
+echo "== actions instantiate =="
+# Compiling automation.h alone proves nothing: the actions are templates, so an
+# `override` that does not match, or a pure virtual left unimplemented, is only
+# diagnosed on a concrete instantiation. tests/test_automation.cpp creates them
+# the way the generated main.cpp does.
+if [ -z "$V4L2" ]; then
+  echo "  SKIPPED (needs esp_video for linux/videodev2.h)"
+else
+  printf '  %-22s ' "test_automation.cpp"
+  if out=$(g++ -std=gnu++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter \
+        -Wno-missing-field-initializers -I"$STUB" $V4L2 -I"$SRC" tests/test_automation.cpp 2>&1); then
+    echo "OK"
+  else
+    echo "FAILED"; echo "$out" | head -20; fail=1
+  fi
+fi
 
 echo
 echo "== headers stand alone =="

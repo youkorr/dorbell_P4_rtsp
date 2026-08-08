@@ -24,10 +24,6 @@ namespace rtsp_server {
 
 static const char *const TAG = "rtsp_server.video";
 
-/// Only one input buffer is needed: the H.264 encoder is driven synchronously,
-/// one access unit at a time, exactly like the ESP-Video reference pipeline.
-static constexpr uint32_t ENCODER_OUTPUT_BUFFERS = 1;
-
 static bool set_control(int fd, uint32_t ctrl_class, uint32_t id, int32_t value) {
   struct v4l2_ext_control control[1] = {};
   struct v4l2_ext_controls controls = {};
@@ -47,14 +43,11 @@ bool VideoPipeline::start(const Config &config, FrameCallback callback) {
 
   this->config_ = config;
   this->callback_ = std::move(callback);
+  this->drive_camera_ = config.drive_camera;
 
   if (this->camera_ != nullptr) {
     // Frames come from the shared esp_cam_sensor component; it owns the V4L2
     // device, so we must not open it ourselves.
-    if (this->config_.codec != VideoCodec::MJPEG) {
-      ESP_LOGE(TAG, "'camera_id' only supports 'codec: mjpeg'");
-      return false;
-    }
     this->camera_->start_streaming();
     this->width_ = this->camera_->get_image_width();
     this->height_ = this->camera_->get_image_height();
@@ -65,22 +58,15 @@ bool VideoPipeline::start(const Config &config, FrameCallback callback) {
       this->close_all_();
       return false;
     }
-    if (this->config_.codec == VideoCodec::H264) {
-      if (!this->open_h264_encoder_()) {
-        this->close_all_();
-        return false;
-      }
-    } else {
-      if (!this->open_jpeg_encoder_(this->width_, this->height_)) {
-        this->close_all_();
-        return false;
-      }
-      const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      if (ioctl(this->cam_fd_, VIDIOC_STREAMON, &type) != 0) {
-        ESP_LOGE(TAG, "VIDIOC_STREAMON failed on the camera (errno %d)", errno);
-        this->close_all_();
-        return false;
-      }
+    if (!this->open_jpeg_encoder_(this->width_, this->height_)) {
+      this->close_all_();
+      return false;
+    }
+    const int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(this->cam_fd_, VIDIOC_STREAMON, &type) != 0) {
+      ESP_LOGE(TAG, "VIDIOC_STREAMON failed on the camera (errno %d)", errno);
+      this->close_all_();
+      return false;
     }
   }
 
@@ -97,14 +83,9 @@ bool VideoPipeline::start(const Config &config, FrameCallback callback) {
     return false;
   }
 
-  if (this->config_.codec == VideoCodec::MJPEG) {
-    ESP_LOGI(TAG, "pipeline started: %" PRIu32 "x%" PRIu32 " MJPEG q%u @ %" PRIu32 " fps (source: %s)",
-             this->width_, this->height_, this->config_.jpeg_quality, this->config_.framerate,
-             this->camera_ != nullptr ? "camera component" : this->config_.device.c_str());
-  } else {
-    ESP_LOGI(TAG, "pipeline started: %" PRIu32 "x%" PRIu32 " H.264 @ %" PRIu32 " fps, %" PRIu32 " bps",
-             this->width_, this->height_, this->config_.framerate, this->config_.bitrate);
-  }
+  ESP_LOGI(TAG, "pipeline started: %" PRIu32 "x%" PRIu32 " MJPEG q%u @ %" PRIu32 " fps (source: %s)",
+           this->width_, this->height_, this->config_.jpeg_quality, this->config_.framerate,
+           this->camera_ != nullptr ? "camera component" : this->config_.device.c_str());
   return true;
 }
 
@@ -145,17 +126,7 @@ bool VideoPipeline::open_camera_() {
   this->width_ = format.fmt.pix.width;
   this->height_ = format.fmt.pix.height;
 
-  const bool h264 = this->config_.codec == VideoCodec::H264;
-
-  if (h264 && ((this->width_ % 16) != 0 || (this->height_ % 16) != 0)) {
-    ESP_LOGE(TAG,
-             "sensor resolution %" PRIu32 "x%" PRIu32 " is not a multiple of 16; the hardware H.264 encoder "
-             "cannot use it. Pick another sensor format, or use 'codec: mjpeg'.",
-             this->width_, this->height_);
-    return false;
-  }
-  if (!h264 && ((this->width_ % 8) != 0 || (this->height_ % 8) != 0 || this->width_ > 2040 ||
-                this->height_ > 2040)) {
+  if ((this->width_ % 8) != 0 || (this->height_ % 8) != 0 || this->width_ > 2040 || this->height_ > 2040) {
     ESP_LOGE(TAG,
              "sensor resolution %" PRIu32 "x%" PRIu32 " cannot be described by RFC 2435: it must be a multiple "
              "of 8 and at most 2040 pixels on each side.",
@@ -163,14 +134,14 @@ bool VideoPipeline::open_camera_() {
     return false;
   }
 
-  // H.264 consumes planar YUV420; the JPEG engine takes the ISP's RGB565 output.
+  // The JPEG engine takes the ISP's RGB565 output.
   format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   format.fmt.pix.width = this->width_;
   format.fmt.pix.height = this->height_;
-  format.fmt.pix.pixelformat = h264 ? V4L2_PIX_FMT_YUV420 : V4L2_PIX_FMT_RGB565;
+  format.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
   if (ioctl(this->cam_fd_, VIDIOC_S_FMT, &format) != 0) {
-    ESP_LOGE(TAG, "the camera cannot output %s (errno %d). Enable the ISP in the `esp_video` component.",
-             h264 ? "YUV420" : "RGB565", errno);
+    ESP_LOGE(TAG, "the camera cannot output RGB565 (errno %d). Enable the ISP in the `esp_video` component.",
+             errno);
     return false;
   }
 
@@ -289,119 +260,6 @@ bool VideoPipeline::encode_jpeg_(const uint8_t *src, uint32_t width, uint32_t he
 }
 
 // ---------------------------------------------------------------------------
-// Hardware H.264 encoder (V4L2 memory-to-memory)
-// ---------------------------------------------------------------------------
-
-bool VideoPipeline::open_h264_encoder_() {
-  this->enc_fd_ = open(this->config_.encoder_device.c_str(), O_RDONLY);
-  if (this->enc_fd_ < 0) {
-    ESP_LOGE(TAG,
-             "cannot open '%s' (errno %d). Set `enable_h264: true` on the `esp_video` component so the hardware "
-             "encoder device is built.",
-             this->config_.encoder_device.c_str(), errno);
-    return false;
-  }
-
-  // The OUTPUT queue is the encoder input (raw YUV420) and must be configured
-  // before the CAPTURE queue, which validates its geometry against it.
-  struct v4l2_format format = {};
-  format.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  format.fmt.pix.width = this->width_;
-  format.fmt.pix.height = this->height_;
-  format.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
-  if (ioctl(this->enc_fd_, VIDIOC_S_FMT, &format) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_S_FMT (OUTPUT/YUV420) failed on the encoder (errno %d)", errno);
-    return false;
-  }
-
-  struct v4l2_requestbuffers req = {};
-  req.count = ENCODER_OUTPUT_BUFFERS;
-  req.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  req.memory = V4L2_MEMORY_USERPTR;  // fed directly with the camera's buffers
-  if (ioctl(this->enc_fd_, VIDIOC_REQBUFS, &req) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_REQBUFS (OUTPUT) failed on the encoder (errno %d)", errno);
-    return false;
-  }
-
-  format = {};
-  format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  format.fmt.pix.width = this->width_;
-  format.fmt.pix.height = this->height_;
-  format.fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
-  if (ioctl(this->enc_fd_, VIDIOC_S_FMT, &format) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_S_FMT (CAPTURE/H264) failed on the encoder (errno %d)", errno);
-    return false;
-  }
-
-  req = {};
-  req.count = 1;
-  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  req.memory = V4L2_MEMORY_MMAP;
-  if (ioctl(this->enc_fd_, VIDIOC_REQBUFS, &req) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_REQBUFS (CAPTURE) failed on the encoder (errno %d)", errno);
-    return false;
-  }
-
-  struct v4l2_buffer buf = {};
-  buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  buf.memory = V4L2_MEMORY_MMAP;
-  buf.index = 0;
-  if (ioctl(this->enc_fd_, VIDIOC_QUERYBUF, &buf) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_QUERYBUF failed on the encoder (errno %d)", errno);
-    return false;
-  }
-
-  this->enc_capture_buffer_ = static_cast<uint8_t *>(
-      mmap(nullptr, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, this->enc_fd_, buf.m.offset));
-  if (this->enc_capture_buffer_ == nullptr || this->enc_capture_buffer_ == MAP_FAILED) {
-    ESP_LOGE(TAG, "mmap failed for the encoder output buffer");
-    this->enc_capture_buffer_ = nullptr;
-    return false;
-  }
-  this->enc_capture_size_ = buf.length;
-
-  if (ioctl(this->enc_fd_, VIDIOC_QBUF, &buf) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_QBUF failed on the encoder (errno %d)", errno);
-    return false;
-  }
-
-  this->apply_encoder_controls_();
-
-  int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(this->enc_fd_, VIDIOC_STREAMON, &type) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_STREAMON (CAPTURE) failed on the encoder (errno %d)", errno);
-    return false;
-  }
-  type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  if (ioctl(this->enc_fd_, VIDIOC_STREAMON, &type) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_STREAMON (OUTPUT) failed on the encoder (errno %d)", errno);
-    return false;
-  }
-  type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(this->cam_fd_, VIDIOC_STREAMON, &type) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_STREAMON failed on the camera (errno %d)", errno);
-    return false;
-  }
-
-  return true;
-}
-
-void VideoPipeline::apply_encoder_controls_() {
-  if (!set_control(this->enc_fd_, V4L2_CID_CODEC_CLASS, V4L2_CID_MPEG_VIDEO_BITRATE,
-                   static_cast<int32_t>(this->config_.bitrate)))
-    ESP_LOGW(TAG, "failed to set the H.264 bitrate");
-  if (!set_control(this->enc_fd_, V4L2_CID_CODEC_CLASS, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD,
-                   static_cast<int32_t>(this->config_.gop)))
-    ESP_LOGW(TAG, "failed to set the H.264 I-frame period");
-  if (!set_control(this->enc_fd_, V4L2_CID_CODEC_CLASS, V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
-                   static_cast<int32_t>(this->config_.min_qp)))
-    ESP_LOGW(TAG, "failed to set the H.264 minimum QP");
-  if (!set_control(this->enc_fd_, V4L2_CID_CODEC_CLASS, V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
-                   static_cast<int32_t>(this->config_.max_qp)))
-    ESP_LOGW(TAG, "failed to set the H.264 maximum QP");
-}
-
-// ---------------------------------------------------------------------------
 // Pipeline task
 // ---------------------------------------------------------------------------
 
@@ -430,7 +288,9 @@ void VideoPipeline::run_camera_source_() {
 
     // Only one consumer may dequeue from V4L2; `drive_camera: false` leaves that
     // to lvgl_camera_display and we simply read whatever the latest frame is.
-    if (this->config_.drive_camera && !camera->capture_frame()) {
+    // Read through the volatile mirror: the preview can be switched off while
+    // we are running, and the dequeue then has to come back to us.
+    if (this->drive_camera_ && !camera->capture_frame()) {
       vTaskDelay(pdMS_TO_TICKS(frame_ms));
       continue;
     }
@@ -487,45 +347,8 @@ void VideoPipeline::run_v4l2_source_() {
 
     const uint32_t timestamp = static_cast<uint32_t>((now_us * 9) / 100);
 
-    if (this->config_.codec == VideoCodec::MJPEG) {
-      this->encode_jpeg_(this->cam_buffers_[cam_buf.index], this->width_, this->height_, timestamp);
-      ioctl(this->cam_fd_, VIDIOC_QBUF, &cam_buf);
-      continue;
-    }
-
-    // Hand the camera buffer straight to the H.264 encoder input queue.
-    struct v4l2_buffer enc_out = {};
-    enc_out.index = 0;
-    enc_out.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    enc_out.memory = V4L2_MEMORY_USERPTR;
-    enc_out.m.userptr = reinterpret_cast<unsigned long>(this->cam_buffers_[cam_buf.index]);
-    enc_out.length = cam_buf.bytesused;
-    if (ioctl(this->enc_fd_, VIDIOC_QBUF, &enc_out) != 0) {
-      ESP_LOGW(TAG, "VIDIOC_QBUF failed on the encoder input (errno %d)", errno);
-      ioctl(this->cam_fd_, VIDIOC_QBUF, &cam_buf);
-      continue;
-    }
-
-    struct v4l2_buffer enc_cap = {};
-    enc_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    enc_cap.memory = V4L2_MEMORY_MMAP;
-    const bool encoded = ioctl(this->enc_fd_, VIDIOC_DQBUF, &enc_cap) == 0;
-    if (!encoded)
-      ESP_LOGW(TAG, "VIDIOC_DQBUF failed on the encoder output (errno %d)", errno);
-
-    // The encode is done, so the camera buffer can go back into rotation.
+    this->encode_jpeg_(this->cam_buffers_[cam_buf.index], this->width_, this->height_, timestamp);
     ioctl(this->cam_fd_, VIDIOC_QBUF, &cam_buf);
-    ioctl(this->enc_fd_, VIDIOC_DQBUF, &enc_out);
-
-    if (encoded) {
-      if (this->callback_)
-        this->callback_(this->enc_capture_buffer_, enc_cap.bytesused, timestamp);
-      this->frames_encoded_++;
-
-      enc_cap.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-      enc_cap.memory = V4L2_MEMORY_MMAP;
-      ioctl(this->enc_fd_, VIDIOC_QBUF, &enc_cap);
-    }
   }
 }
 
@@ -536,12 +359,6 @@ void VideoPipeline::close_all_() {
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     ioctl(this->cam_fd_, VIDIOC_STREAMOFF, &type);
   }
-  if (this->enc_fd_ >= 0) {
-    type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    ioctl(this->enc_fd_, VIDIOC_STREAMOFF, &type);
-    type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(this->enc_fd_, VIDIOC_STREAMOFF, &type);
-  }
 
   for (uint8_t i = 0; i < 4; i++) {
     if (this->cam_buffers_[i] != nullptr) {
@@ -549,12 +366,6 @@ void VideoPipeline::close_all_() {
       this->cam_buffers_[i] = nullptr;
       this->cam_buffer_size_[i] = 0;
     }
-  }
-
-  if (this->enc_capture_buffer_ != nullptr) {
-    munmap(this->enc_capture_buffer_, this->enc_capture_size_);
-    this->enc_capture_buffer_ = nullptr;
-    this->enc_capture_size_ = 0;
   }
 
   if (this->jpeg_encoder_ != nullptr) {
@@ -567,10 +378,6 @@ void VideoPipeline::close_all_() {
     this->jpeg_out_size_ = 0;
   }
 
-  if (this->enc_fd_ >= 0) {
-    close(this->enc_fd_);
-    this->enc_fd_ = -1;
-  }
   if (this->cam_fd_ >= 0) {
     close(this->cam_fd_);
     this->cam_fd_ = -1;

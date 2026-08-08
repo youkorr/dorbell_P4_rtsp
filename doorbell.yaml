@@ -1,3 +1,13 @@
+# NOTE: this file is an EXAMPLE, to be copied into /config/esphome/.
+# `external_components` only fetches `components/`, never this YAML: after a
+# repository update, copy this file again if you want the fixes.
+# ESP32-P4 smart doorbell: MIPI-CSI camera + RTSP with two-way audio.
+#
+#   OV5647 --MIPI CSI--> ESP32-P4 --MJPEG/RTSP--> go2rtc --WebRTC--> Home Assistant
+#                              <----- G.711 backchannel (talk) -----
+#
+# Everything below the camera and the audio (button, chime relay, LED, OTA...)
+# is plain ESPHome, exactly as in the rest of the project.
 
 substitutions:
   name: doorbell-p4
@@ -9,30 +19,25 @@ esphome:
 
 
 esp32:
-  flash_size: 16MB
-  variant: ESP32P4
-  board: esp32-p4-evboard
-  cpu_frequency: 360MHz
-  engineering_sample: true
+  variant: esp32p4
+  # Left to ESPHome on purpose: no `board:` (there is no entry for most P4
+  # boards, and `esp32-p4-evboard` silently selects a pre-rev.300 linker script)
+  # and no pinned IDF `version:`. The MIPI-CSI stack, the hardware JPEG encoder
+  # and the new I2S driver all need a recent IDF, and pinning one only rots --
+  # 5.4.0 is already below what the `i2c` component now requires.
+  #
+  # If the boot log reports a chip revision below v3.0, add
+  # `engineering_sample: true` here.
   framework:
     type: esp-idf
-    advanced:
-      enable_idf_experimental_features: true
     sdkconfig_options:
-      CONFIG_COMPILER_OPTIMIZATION_PERF: y
-      CONFIG_SPIRAM_XIP_FROM_PSRAM: y
-      CONFIG_GDMA_ISR_IRAM_SAFE: y
-      CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM: "y"
-      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "n"
-      CONFIG_SPIRAM_RODATA: "n"
-      CONFIG_ESP32_SPIRAM_SUPPORT: "y"
-      CONFIG_SPIRAM_USE_MALLOC: "y"
-      CONFIG_SPIRAM_SPEED_200M: "y"
-      CONFIG_SPIRAM_SPEED: "200"
-      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
-      CONFIG_ESP_TASK_LOOP_STACK_SIZE: "16384"
-      CONFIG_LWIP_MAX_SOCKETS: "16"
-      CONFIG_LWIP_SO_RCVBUF: "y"
+      # The camera and JPEG buffers live in PSRAM.
+      CONFIG_SPIRAM: y
+      CONFIG_SPIRAM_MODE_HEX: y
+      CONFIG_SPIRAM_SPEED_200M: y
+      CONFIG_SPIRAM_USE_MALLOC: y
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360: y
+      # The RTSP task pushes RTP straight into lwIP; give it room to breathe.
       CONFIG_LWIP_TCP_SND_BUF_DEFAULT: "65534"
       CONFIG_LWIP_TCP_WND_DEFAULT: "65534"
       CONFIG_WIFI_RMT_DYNAMIC_TX_BUFFER_NUM: "64"
@@ -40,17 +45,27 @@ esp32:
       CONFIG_WIFI_RMT_TX_BA_WIN: "32"
 
 
+# NOTE: `rtsp_server` currently lives on the working branch below. Replace both
+# `ref:` values with `main` once the PR is merged.
+#
+# `refresh: 0s` is not cosmetic. By default ESPHome keeps a cached clone for A
+# WHOLE DAY, keyed on the branch NAME rather than the commit: if the branch moves
+# forward, a build made in the previous 24 hours keeps using the old code, in
+# silence. That is what produces errors such as "Unable to find action with the
+# name 'rtsp_server.play_test_tone'" when the action does exist in the repo.
 external_components:
   - source:
       type: git
       url: https://github.com/youkorr/dorbell_P4_rtsp
       ref: claude/doorbell-p4-rtsp-audio-gkdosc
     components: [rtsp_server]
+    refresh: 0s
   - source:
       type: git
       url: https://github.com/youkorr/esphome_esp-video
       ref: claude/usb-uvc-consumer-integration-gnbflf
     components: [esp_video, esp_cam_sensor]
+    refresh: 0s
 
 logger:
   level: INFO
@@ -63,8 +78,23 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-# On an ESP32-P4 the radio lives in the ESP32-C6 companion; this is the usual
-# esp-hosted setup, adjust to your board.
+# The ESP32-P4 has no radio of its own: Wi-Fi comes from an ESP32-C6 companion
+# over SDIO, and ESPHome refuses a `wifi:` block on a P4 without this. These pins
+# are the P4 Function EV Board's and the Waveshare NANO's; they DIFFER from board
+# to board, so check your schematic. A wrong pin here means Wi-Fi never comes up.
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+  use_psram: true
+  slot: 1
+
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
@@ -73,6 +103,16 @@ wifi:
     password: !secret fallback_password
 
 captive_portal:
+
+# The C6 needs matching esp-hosted firmware. This exposes it as an `update`
+# entity in Home Assistant instead of making you flash the C6 by hand.
+http_request:
+
+update:
+  - platform: esp32_hosted
+    type: http
+    source: https://esphome.github.io/esp-hosted-firmware/manifest/esp32c6.json
+    name: C6 Firmware
 
 # ---------------------------------------------------------------------------
 # Camera
@@ -91,17 +131,9 @@ esp_video:
   xclk_pin: GPIO36 # -1 if your board has its own 24 MHz oscillator
   xclk_freq: 24000000
   enable_isp: true # RAW -> RGB565 conversion, feeds the JPEG encoder
-  enable_h264: false
-  
-esp_cam_sensor:
-  id: p4_cam
-  i2c_id: bsp_bus
-  sensor_type: ov5647
-  resolution: "800x640" #"1280x960"    #"800x640" 
-  framerate: 30
-  mirror_x: false
-  mirror_y: false
-  rotation: 0
+  # MJPEG uses the ESP-IDF hardware JPEG driver directly, so enable_jpeg
+  # (/dev/video10) is not required either.
+
 # ---------------------------------------------------------------------------
 # RTSP server (video + two-way audio)
 # ---------------------------------------------------------------------------
@@ -112,17 +144,24 @@ rtsp_server:
   path: /doorbell
   username: !secret rtsp_username
   password: !secret rtsp_password
-  # En MJPEG, go2rtc ouvre DEUX sessions RTSP (le transcodage H.264 + le
-  # backchannel). 3 laisse de la marge pour un VLC de diagnostic.
+  # With MJPEG, go2rtc opens TWO RTSP sessions (the H.264 transcode plus the
+  # backchannel). 3 leaves room for a VLC while debugging.
   max_clients: 3
 
+  # Announce the ONVIF `sendonly` track to every client, not just to one that
+  # sends the `Require` header. That is what makes two-way audio DISCOVERABLE:
+  # go2rtc, Frigate and the Lovelace cards decide whether a camera can be talked
+  # to by probing the stream, and a track advertised only on request is invisible
+  # to that probe -- so the talk button never appears, on a device whose
+  # backchannel works perfectly. Set `auto` for strict ONVIF behaviour.
+  backchannel: always
+
   video:
-    codec: mjpeg # hardware JPEG encoder; H.264 is an option, see below
+    # MJPEG only. The P4 has a hardware H.264 encoder, but nothing on the chip
+    # decodes H.264 back, and the encoder consumes YUV420 while an LVGL preview
+    # needs RGB565 -- so a screen and the stream could not share one camera.
     framerate: 15
     jpeg_quality: 25 # 1..100; ~25 keeps a frame around 40-60 kB
-    max_clients: 4
-    drive_camera: false
-
 
   audio:
     codec: pcmu
@@ -132,7 +171,13 @@ rtsp_server:
     gain: 6.0
     volume: 0.8
     half_duplex: true
-    talk_timeout: 300ms
+    # Time the microphone stays muted AFTER the far end's voice has finished
+    # leaving the speaker -- so, in practice, the room's reverberation time.
+    # Too short and the mic reopens while the far end is still ringing in the
+    # room, sends it back, and every word returns as an echo. Raise towards
+    # 800ms in a bare, hard-walled stairwell; the cost is how fast the visitor
+    # can interrupt.
+    talk_timeout: 500ms
 
 fdaudio:
   id: audio_engine
@@ -166,19 +211,33 @@ speaker:
 
   on_talk_start:
     - switch.turn_on: amp_enable
-    - light.turn_on: status_led
+    - light.turn_on: status_light
   on_talk_end:
     - switch.turn_off: amp_enable
-    - light.turn_off: status_led
+    - light.turn_off: status_light
 
 # ---------------------------------------------------------------------------
 # Doorbell button, chime and indicators — ordinary ESPHome
 # ---------------------------------------------------------------------------
 
+# The entity Home Assistant understands natively as a doorbell: it shows up as
+# `event.<device>_sonnette`, its state is the timestamp of the last press, and
+# it can be picked straight out of the automation editor as a trigger. A bare
+# binary_sensor cannot do any of that -- nothing in Home Assistant reacts to one
+# on its own, and a short pulse is easy to miss entirely.
+event:
+  - platform: template
+    id: doorbell_event
+    name: "Sonnette"
+    device_class: doorbell
+    event_types:
+      - pressed
+
 binary_sensor:
   - platform: gpio
     id: doorbell_button
     name: "Bouton"
+    device_class: occupancy
     pin:
       number: GPIO32
       mode:
@@ -191,8 +250,29 @@ binary_sensor:
     on_press:
       # Ring the local chime, then let Home Assistant do the notification.
       - switch.turn_on: chime_relay
+      # Three ways out, so the press cannot be missed: the event entity, a raw
+      # bus event for YAML automations, and this binary_sensor's own state.
+      - event.trigger:
+          id: doorbell_event
+          event_type: pressed
+      - homeassistant.event:
+          event: esphome.doorbell_pressed
+          data:
+            device: ${name}
       - delay: 1s
       - switch.turn_off: chime_relay
+
+  - platform: template
+    name: "Micro actif"
+    device_class: problem
+    entity_category: diagnostic
+    # Reversed on purpose: ON means there IS a problem, i.e. the microphone
+    # source has stopped delivering samples altogether.
+    lambda: 'return !id(doorbell_stream).mic_alive();'
+  - platform: template
+    name: "On vous parle"
+    entity_category: diagnostic
+    lambda: 'return id(doorbell_stream).is_talking();'
 
 switch:
   - platform: gpio
@@ -208,9 +288,31 @@ switch:
     pin: GPIO28
     restore_mode: ALWAYS_OFF
 
+  # Speak in front of the doorbell and you hear yourself: capture, gain, G.711
+  # and playback are all proven at once, with no network and nobody at the other
+  # end. A bench test, not a mode to leave on -- microphone and speaker sit on
+  # the same board and feedback is only a matter of volume.
+  - platform: template
+    name: "Test audio (boucle micro vers haut-parleur)"
+    id: audio_loopback_switch
+    icon: mdi:microphone-message
+    entity_category: diagnostic
+    restore_mode: ALWAYS_OFF
+    optimistic: true
+    turn_on_action:
+      - switch.turn_on: amp_enable
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: true
+    turn_off_action:
+      - rtsp_server.set_loopback:
+          id: doorbell_stream
+          state: false
+      - switch.turn_off: amp_enable
+
 light:
   - platform: status_led
-    id: status_led
+    id: status_light
     pin: GPIO45
 
 text_sensor:
@@ -225,3 +327,45 @@ sensor:
     lambda: 'return id(doorbell_stream).client_count();'
     update_interval: 10s
     accuracy_decimals: 0
+
+  # The microphone, measured rather than assumed. Read it like this:
+  #   -100 dBFS   digital silence -- the source delivers zeros. Wrong I2S slot,
+  #               dead capsule, gain at zero. No network setting will fix it.
+  #   -60 .. -40  it hears, but faintly: raise `gain` in the audio block.
+  #   -30 ..  -6  a healthy speech level.
+  #      > -3     clipping: lower the gain.
+  - platform: template
+    name: "Niveau micro"
+    unit_of_measurement: dBFS
+    accuracy_decimals: 0
+    device_class: sound_pressure
+    state_class: measurement
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: 'return id(doorbell_stream).mic_level_db();'
+
+  # Stuck at 0 while you press talk in Home Assistant means the downstream voice
+  # never reaches the P4 at all: the fault is upstream (go2rtc, or a backchannel
+  # that was never negotiated), not in this component.
+  - platform: template
+    name: "Paquets audio recus"
+    accuracy_decimals: 0
+    state_class: total_increasing
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: 'return id(doorbell_stream).audio_packets_received();'
+
+button:
+  # Proves the speaker on its own: no beep, no point looking at Home Assistant.
+  - platform: template
+    name: "Bip de test"
+    icon: mdi:volume-high
+    entity_category: diagnostic
+    on_press:
+      - switch.turn_on: amp_enable
+      - rtsp_server.play_test_tone:
+          id: doorbell_stream
+          frequency: 1000
+          duration: 600ms
+      - delay: 1s
+      - switch.turn_off: amp_enable

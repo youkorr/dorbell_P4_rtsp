@@ -1,12 +1,18 @@
------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Reference Frigate configuration for the ESP32-P4 doorbell.
+#
+# Replace every placeholder in CAPITALS. Frigate refuses to start on a single
+# unresolved {VARIABLE}, and the error often points at a line that is not the
+# culprit -- so check them all before hunting elsewhere.
+# ---------------------------------------------------------------------
 
 version: 0.17-0
 
 mqtt:
-  host: 192.168.1.38
+  host: FRIGATE_HOST_IP
   port: 1883
   user: frigate
-  password: Ncaseone132??
+  password: "{FRIGATE_MQTT_PASSWORD}"
   stats_interval: 60
 
 detectors:
@@ -22,59 +28,57 @@ birdseye:
 # ---------------------------------------------------------------------------
 go2rtc:
   streams:
-    # --- Caméra Tapo existante -----------------------------------------------
-    frigate1:
-      - rtsp://Tapoone:Tapoone132@192.168.1.13:554/stream1
-      - ffmpeg:frigate1#audio=aac
-
-    # Flux MJPEG réduit, consommé par un écran ESP32.
-    frigate1_esp32:
-      #- ffmpeg:rtsp://Tapoone:{FRIGATE_TAPO_PASSWORD}@192.168.1.13:554/stream2#video=mjpeg#width=640#height=480#q:v=5#huffman=0#fps=15
-      - ffmpeg:rtsp://Tapoone:Tapoone132@192.168.1.13:554/stream2#video=mjpeg#width=640#height=480#q:v=5#huffman=0#fps=15
-    # --- Sonnette ESP32-P4 ---------------------------------------------------
-    # UNE SEULE source doit tenir le backchannel ONVIF ouvert. go2rtc le demande
-    # par défaut sur une URL rtsp:// nue, et tout fragment '#' inverse ce défaut.
-    # Ici `doorbell` ne sert que d'entrée au transcodage, donc il le cède avec
-    # '#backchannel=0' ; c'est `doorbell_webrtc` qui le porte, explicitement.
-    # Deux sources qui le demandent en même temps, c'est la cause n°1 du
-    # « le push-to-talk a marché une fois puis plus jamais ».
-    doorbell:
-      - rtsp://1169:1169@192.168.1.9:8554/doorbell#backchannel=0
-
-    # WebRTC ne sait pas transporter du MJPEG : la vidéo doit être transcodée en
-    # H.264. ffmpeg ne fait QUE la vidéo — pas de '#audio=copy'. Il ne remonte
-    # pas le backchannel, et sans piste audio à copier il sort en erreur, ce que
-    # go2rtc relance en boucle (connexion/TEARDOWN toutes les secondes côté P4).
-    # La seconde ligne apporte directement le micro ET le backchannel, en G.711
-    # intact : aucun aller-retour de codec sur la voix.
+    # --- The ESP32-P4 doorbell ----------------------------------------------
+    # EXACTLY ONE source may hold the ONVIF backchannel open. go2rtc requests it
+    # by default on a bare rtsp:// URL, and any '#' fragment flips that default
+    # off. Here `doorbell` is only the transcode input, so it gives it up with
+    # '#backchannel=0'; `doorbell_webrtc` carries it, explicitly.
     #
-    # Si vous passez le P4 en `codec: h264`, supprimez `doorbell_webrtc`, retirez
-    # le '#backchannel=0' de `doorbell` et pointez la caméra sur `doorbell`.
+    # Two sources requesting it at once is the number one cause of "push-to-talk
+    # worked once and then never again".
+    doorbell:
+      - rtsp://RTSP_USER:RTSP_PASSWORD@DOORBELL_IP:8554/doorbell#backchannel=0
+
+    # WebRTC cannot carry MJPEG, so the video has to be transcoded to H.264.
+    # ffmpeg does the VIDEO ONLY -- no '#audio=copy'. It does not carry the
+    # backchannel upstream, and with no audio track to copy it exits with an
+    # error, which go2rtc then restarts in a loop (you see a connection and a
+    # TEARDOWN every second in the P4's logs).
+    #
+    # The second line brings the microphone AND the backchannel directly, in
+    # untouched G.711: no codec round trip on the voice.
+    #
+    # This transcode is unavoidable: the P4 emits only MJPEG. (H.264 was removed
+    # from the component -- the P4 cannot decode it for its own LVGL preview;
+    # see the README.)
     doorbell_webrtc:
-      #- ffmpeg:doorbell#video=h264
-      #- ffmpeg:doorbell#video=h264#audio=copy#raw=-r 15 -g 15 
       - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
-      - rtsp://1169:1169@192.168.1.9:8554/doorbell#backchannel=1
+      - rtsp://RTSP_USER:RTSP_PASSWORD@DOORBELL_IP:8554/doorbell#backchannel=1
+
+    # --- An existing camera, for illustration -------------------------------
+    # Nothing to do with the doorbell; kept to show a normal camera alongside.
+    frigate1:
+      - rtsp://CAM_USER:CAM_PASSWORD@CAM_IP:554/stream1
+      - ffmpeg:frigate1#audio=aac
 
   webrtc:
     listen: :8555
-    # L'adresse que le navigateur doit joindre — celle de la machine Frigate,
-    # PAS l'exemple '1.2.3.4' de la documentation. Un candidat inatteignable
-    # donne une connexion qui s'établit sans jamais afficher d'image.
+    # The address the BROWSER must reach -- the Frigate machine's own, not the
+    # documentation's '1.2.3.4'. An unreachable candidate gives a connection
+    # that establishes and never shows a picture.
     candidates:
-      - 192.168.1.38:8555
-      - 100.X.Y.Z:8555
+      - FRIGATE_HOST_IP:8555
 
-    # Pour un accès depuis l'extérieur, ajoutez ici votre IP publique et un
-    # serveur TURN renseigné. Inutile — et nuisible si laissé en placeholder —
-    # tant que vous restez sur le LAN.
+    # For access from outside, add your public IP and a configured TURN server
+    # here. Unnecessary -- and harmful if left as a placeholder -- while you
+    # stay on the LAN.
 
 # ---------------------------------------------------------------------------
-# Enregistrement / captures
+# Recording and snapshots
 # ---------------------------------------------------------------------------
 record:
-  # Désactivé globalement : l'activer depuis l'UI ou MQTT n'aura aucun effet
-  # tant que cette clé est à false.
+  # Disabled globally: enabling it from the UI or over MQTT has no effect while
+  # this key is false.
   enabled: false
   expire_interval: 60
   sync_recordings: true
@@ -87,57 +91,70 @@ record:
     post_capture: 5
     retain:
       days: 14
-      mode: motion
   detections:
     pre_capture: 5
     post_capture: 5
     retain:
       days: 14
-      mode: motion
 
 snapshots:
   enabled: true
   clean_copy: true
-  timestamp: true
+  timestamp: false
   bounding_box: true
-  crop: false
-  height: 175
-  required_zones: []
   retain:
     default: 10
-    objects:
-      person: 15
-  quality: 70
 
 semantic_search:
-  enabled: true
-  # À remettre à true ponctuellement seulement : laissé à true, l'historique est
-  # réindexé À CHAQUE redémarrage de Frigate.
-  reindex: false
-  model_size: small
-
-detect:
-  enabled: true
-
-face_recognition:
-  enabled: true
-  model_size: small
-
-lpr:
-  enabled: true
-
-classification:
-  bird:
-    enabled: true
-
-notifications:
-  enabled: true
-  email: sapphire.younes@protonmail.com
+  enabled: false
 
 # ---------------------------------------------------------------------------
-# Caméras
+# Cameras
 # ---------------------------------------------------------------------------
 cameras:
+  doorbell:
+    ffmpeg:
+      inputs:
+        # Consume go2rtc's restream, never the P4 directly: that way the
+        # doorbell serves ONE RTSP client however many views are open. Its
+        # `max_clients` is small, and the MJPEG chain already takes two
+        # sessions.
+        - path: rtsp://127.0.0.1:8554/doorbell_webrtc
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+    detect:
+      enabled: true
+      # The OV5647 resolution as configured in the ESPHome YAML
+      # (`esp_cam_sensor: resolution:`).
+      width: 640
+      height: 480
+      # 5 fps is plenty for a doorbell and spares the detector. Aiming higher is
+      # pointless: the stream tops out around 16 fps, limited by the LVGL
+      # preview overhead rather than by the network.
+      fps: 5
+    live:
+      # Frigate 0.15+ syntax: a dict of "display name" -> go2rtc stream.
+      # (`stream_name:` was the 0.14 form and no longer exists.)
+      streams:
+        Doorbell: doorbell_webrtc
+    objects:
+      track:
+        - person
+      filters:
+        person:
+          min_score: 0.7
+          threshold: 0.8
+    motion:
+      threshold: 30
+      contour_area: 83
+      improve_contrast: false
+    notifications:
+      # Frigate's own notifications fire on OBJECT DETECTION. They know nothing
+      # about the doorbell button -- that is a Home Assistant automation, see
+      # docs/home-assistant.md §10.
+      enabled: true
+
   frigate1:
     ffmpeg:
       inputs:
@@ -154,45 +171,6 @@ cameras:
       track:
         - person
         - cat
-      filters:
-        person:
-          min_score: 0.7
-          threshold: 0.8
-    motion:
-      threshold: 30
-      contour_area: 83
-      improve_contrast: false
-    notifications:
-      enabled: true
-
-  doorbell:
-    ffmpeg:
-      inputs:
-        # On consomme le restream de go2rtc, jamais le P4 directement : celui-ci
-        # n'a ainsi qu'un seul client RTSP à servir quel que soit le nombre de
-        # vues ouvertes. Son `max_clients` par défaut est de 2.
-        - path: rtsp://127.0.0.1:8554/doorbell_webrtc
-          input_args: preset-rtsp-restream
-          roles:
-            - detect
-    detect:
-      enabled: true
-      # La résolution du capteur OV5647 telle que configurée dans le YAML
-      # ESPHome (`esp_cam_sensor: resolution:`).
-      width: 640
-      height: 480
-      # 5 fps suffit pour une sonnette et épargne le Coral. Inutile de viser
-      # plus haut : le flux plafonne autour de 16 fps, imposé par l'overhead
-      # LVGL de l'aperçu local, pas par le réseau.
-      fps: 5
-    live:
-      # Syntaxe 0.15+ : dictionnaire « nom affiché » -> flux go2rtc.
-      # (`stream_name:` était la forme 0.14, elle n'existe plus.)
-      streams:
-        Sonnette: doorbell_webrtc
-    objects:
-      track:
-        - person
       filters:
         person:
           min_score: 0.7

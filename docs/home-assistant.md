@@ -1,479 +1,925 @@
-# Intégration Home Assistant
+# Home Assistant integration
 
-## 0. Comment Home Assistant trouve-t-il le flux ?
+How the ESP32-P4 doorbell reaches Home Assistant: go2rtc, Frigate, the Lovelace
+card, notifications, and what to check when something does not work.
 
-Il ne le trouve pas : **il n'y a aucune découverte automatique**, et Home
-Assistant ne parle jamais au P4 en RTSP. La chaîne est en deux temps :
+Throughout, the running example uses these values. Yours will differ — replace
+them everywhere.
+
+| | |
+|---|---|
+| ESP32-P4 | `192.168.1.9`, RTSP on port 8554 |
+| Home Assistant / Frigate host | `192.168.1.38` |
+| ESPHome device name | `doorbell-p4-lvgl` |
+| go2rtc streams | `doorbell` (source), `doorbell_webrtc` (what you watch) |
+| Frigate camera | `doorbell` → `camera.doorbell` in Home Assistant |
+
+---
+
+## 1. How the pieces fit
+
+The P4 serves **MJPEG video and G.711 audio over RTSP**. Home Assistant cannot
+consume that directly for live viewing with sound, so go2rtc sits in between and
+republishes it as WebRTC. There is **no auto-discovery**: you configure the URL
+by hand.
 
 ```
-   P4  ──RTSP──►  go2rtc  ──WebRTC──►  Home Assistant
-        ▲
-        └── adresse écrite À LA MAIN dans go2rtc.yaml
+ESP32-P4 ──RTSP──► go2rtc ──WebRTC──► Lovelace card
+   ▲                  │
+   └── backchannel ───┘
 ```
 
-1. Le P4 ouvre son serveur RTSP sur `rtsp://<ip-du-P4>:8554/doorbell`.
-2. **Vous** inscrivez cette adresse dans `go2rtc.yaml`.
-3. Home Assistant ne connaît que go2rtc. Le P4 n'apparaît nulle part côté flux.
+Three things follow, and each one bites somebody:
 
-Le P4 est donc découvert par Home Assistant **en tant qu'appareil ESPHome**
-(via l'API native, mDNS) — bouton, carillon, capteurs — mais son flux vidéo,
-lui, transite uniquement par go2rtc.
+1. **WebRTC cannot carry MJPEG.** go2rtc has to run ffmpeg to transcode the
+   video to H.264. That costs CPU on the Home Assistant machine, and it is the
+   root of the microphone-button problem in section 8.
+2. **The audio is never transcoded.** G.711 crosses the whole chain untouched in
+   both directions — browsers speak PCMU/PCMA natively.
+3. **The P4 must have a stable address.** go2rtc dials it by IP or hostname; if
+   that changes, the stream dies silently.
 
-### Conséquence : le P4 doit avoir une adresse stable
-
-Sinon go2rtc le perd au renouvellement du bail DHCP. Deux options :
+### Give the P4 a fixed address
 
 ```yaml
-# Option A — par nom mDNS, publié automatiquement par ESPHome
+# Option A — mDNS name, published automatically by ESPHome:
+#   rtsp://user:pass@doorbell-p4-lvgl.local:8554/doorbell
+# Reliable only if your network resolves .local names, which many do not
+# across VLANs.
+#
+# Option B — a DHCP reservation on your router (recommended):
+#   rtsp://user:pass@192.168.1.9:8554/doorbell
+```
+
+The device logs its own URL on every boot, and the example configs expose it as
+a `text_sensor` named "Flux RTSP".
+
+---
+
+## 2. Prerequisites
+
+- **go2rtc**, either the standalone add-on or the copy embedded in Frigate;
+- **HTTPS access to Home Assistant** if you want to talk back — see section 8.
+  Nabu Casa and Tailscale both provide this with no certificate to manage;
+- one of these Lovelace cards, via HACS:
+  - **Advanced Camera Card** (formerly Frigate Card), or
+  - **WebRTC Camera** (AlexxIT).
+
+---
+
+## 3. Which go2rtc?
+
+Decide this first, because everything downstream depends on it.
+
+| | Use it when |
+|---|---|
+| **go2rtc inside Frigate** | you already run Frigate. It has its own go2rtc; adding a second means two instances fighting over the same camera |
+| **Standalone go2rtc add-on** | you do not run Frigate |
+
+Two go2rtc instances both pulling the doorbell will exceed `max_clients` on the
+P4 and produce intermittent failures that look like network trouble. Pick one.
+
+---
+
+## 4. go2rtc configuration
+
+A ready-to-use file is in [`../go2rtc/go2rtc.yaml`](../go2rtc/go2rtc.yaml).
+
+```yaml
 streams:
+  # The raw source. It gives the backchannel UP with '#backchannel=0' because it
+  # is only used as the transcode input -- see the rule below.
   doorbell:
-    - rtsp://user:pass@doorbell-p4-lvgl.local:8554/doorbell
+    - rtsp://USER:PASS@192.168.1.9:8554/doorbell#backchannel=0
+
+  # What you actually watch. Two sources:
+  #   1. ffmpeg transcodes the video to H.264, because WebRTC cannot carry MJPEG
+  #   2. a direct RTSP session carries the microphone AND the backchannel, in
+  #      G.711, with no codec round trip
+  doorbell_webrtc:
+    - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
+    - rtsp://USER:PASS@192.168.1.9:8554/doorbell#media=audio#backchannel=1
+
+webrtc:
+  listen: ":8555/tcp"
+  candidates:
+    - 192.168.1.38:8555   # the IP of the machine running go2rtc, not an example
+    - stun:8555
+
+api:
+  listen: ":1984"
 ```
 
-Le nom vient de la clé `esphome: name:`. Cela suppose que la machine qui fait
-tourner go2rtc résout le mDNS : c'est le cas sur Home Assistant OS, souvent pas
-dans un conteneur Docker isolé.
+### The one rule
+
+**Exactly one source may hold the ONVIF backchannel open.** go2rtc requests it
+by *default* on a bare `rtsp://` URL, and adding any `#` fragment flips that
+default off:
+
+| URL | Backchannel |
+|---|---|
+| `rtsp://.../doorbell` | ON (default) |
+| `rtsp://.../doorbell#media=video,audio` | OFF |
+| `rtsp://.../doorbell#backchannel=1` | ON (explicit) |
+| `rtsp://.../doorbell#media=audio#backchannel=1` | ON, and no video requested — **use this for the backchannel source** |
+| `rtsp://.../doorbell#backchannel=0` | OFF (explicit) |
+
+Two sources holding it at once is the single most common cause of "two-way audio
+worked once and then never again".
+
+### Consequences for `max_clients`
+
+This chain costs **two RTSP sessions** on the P4. The default `max_clients: 2`
+leaves no room for a third client, so raise it:
 
 ```yaml
-# Option B — par IP, avec une réservation DHCP sur votre box (recommandé)
-streams:
-  doorbell:
-    - rtsp://user:pass@192.168.1.50:8554/doorbell
+rtsp_server:
+  max_clients: 4    # 2 for go2rtc, plus room for VLC while debugging
 ```
 
-### Où lire l'adresse du P4
+### Check that go2rtc is receiving the stream
 
-- Dans les logs ESPHome au démarrage :
-  `[rtsp_server]: listening on rtsp://192.168.1.50:8554/doorbell`
-- Dans Home Assistant, via le capteur **« Flux RTSP »** exposé par les deux
-  exemples de configuration : il affiche l'URL complète, prête à coller dans
-  `go2rtc.yaml`.
-- `esphome logs doorbell-lvgl.yaml` depuis la ligne de commande.
-
-Les `user:pass` de l'URL sont les `username:` / `password:` du bloc
-`rtsp_server:`. S'ils sont absents de votre configuration, le flux est ouvert et
-l'URL se réduit à `rtsp://192.168.1.50:8554/doorbell`.
-
-## 0 bis. Quelle instance de go2rtc ? (à trancher en premier)
-
-Il peut y en avoir **trois** sur une même machine, toutes sur le port 1984, et
-c'est la source de confusion n°1 :
-
-| Instance | Sa configuration | Éditable à la main ? |
-|---|---|---|
-| Add-on go2rtc | le fichier indiqué par ses logs | oui |
-| go2rtc intégré à Home Assistant (≥ 2024.11) | générée automatiquement | **non**, réécrite à chaque démarrage |
-| go2rtc intégré à Frigate | la section `go2rtc:` de `frigate.yaml` | oui |
-
-**N'en gardez qu'une.** Si deux tournent, celle que vous voyez sur `:1984`
-n'est pas forcément celle dont vous éditez le fichier : vos modifications
-semblent alors « disparaître » alors qu'elles n'ont jamais été lues.
-
-La seule source fiable est la première ligne des logs de go2rtc :
+Open `http://192.168.1.38:1984` and click **probe** on **`doorbell_webrtc`**.
+You should see three tracks:
 
 ```
-info  config path=/config/go2rtc_homekit.yml
+video, recvonly, JPEG
+audio, recvonly, PCMU/8000
+audio, sendonly, PCMU/8000     <-- the backchannel
 ```
 
-C'est ce fichier-là qu'il faut éditer, quel que soit le nom attendu.
+> Probe `doorbell_webrtc`, **not** `doorbell`. The latter carries
+> `#backchannel=0` — it gives the backchannel up on purpose and will never show
+> the `sendonly` track, even on a perfectly healthy chain.
 
-## 0 ter. Passer par Frigate (recommandé si vous l'avez déjà)
+If the third line is missing, either an extra `#` in the URL, or the P4 is
+announcing the track on request only — see section 8.
 
-Frigate embarque go2rtc et lit sa configuration depuis `frigate.yaml`, qui n'est
-jamais réécrit. C'est aussi la seule voie où **l'audio bidirectionnel de
-l'Advanced Camera Card est officiellement supporté** : la carte réserve cette
-fonction aux caméras de type Frigate.
+To see the negotiation itself, set `log: {rtsp: trace}` in go2rtc and restart:
+the `DESCRIBE` must carry `Require: www.onvif.org/ver20/backchannel`, and the
+SDP the P4 returns must contain `a=sendonly`.
 
-Désactivez d'abord le démarrage automatique de l'add-on go2rtc, sinon les deux
-se disputent les ports.
+---
+
+## 5. Frigate configuration
+
+Skip this section if you do not use Frigate. A reference config is in
+[`../frigate/frigate.yaml`](../frigate/frigate.yaml).
 
 ```yaml
-# frigate.yaml
 go2rtc:
   streams:
     doorbell:
-      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=0
+      - rtsp://USER:PASS@192.168.1.9:8554/doorbell#backchannel=0
     doorbell_webrtc:
-      - ffmpeg:doorbell#video=h264
-      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell#backchannel=1
+      - ffmpeg:doorbell#video=h264#raw=-r 15 -g 15 -keyint_min 15
+      - rtsp://USER:PASS@192.168.1.9:8554/doorbell#media=audio#backchannel=1
+  webrtc:
+    listen: :8555
+    candidates:
+      - 192.168.1.38:8555
 
 cameras:
   doorbell:
     ffmpeg:
       inputs:
-        # On consomme le restream de go2rtc, pas le P4 directement : le P4 n'a
-        # ainsi qu'un seul client à servir, quel que soit le nombre de vues.
+        # Consume go2rtc's restream, never the P4 directly: that way the
+        # doorbell serves one RTSP client however many views are open.
         - path: rtsp://127.0.0.1:8554/doorbell_webrtc
           input_args: preset-rtsp-restream
-          roles: [detect, record]
+          roles:
+            - detect
     detect:
-      width: 800
-      height: 640
+      enabled: true
+      width: 640
+      height: 480
+      # 5 fps is plenty for a doorbell and spares the detector. Aiming higher is
+      # pointless: the stream tops out around 16 fps.
       fps: 5
     live:
-      # Frigate 0.14. En 0.15+ c'est un dictionnaire :
-      #   streams: {Sonnette: doorbell_webrtc}
-      stream_name: doorbell_webrtc
+      # Frigate 0.15+ syntax: a dict of display name -> go2rtc stream.
+      streams:
+        Doorbell: doorbell_webrtc
+    objects:
+      track:
+        - person
 ```
 
-La carte pointe alors sur la caméra Frigate, sans bloc `go2rtc:` :
+Frigate creates `camera.doorbell` in Home Assistant, and — this matters for the
+Lovelace card — it makes it a **Frigate-type camera**, which is one of the
+conditions for the microphone button.
+
+> Every `{VARIABLE}` in a Frigate config must resolve. A single missing one
+> invalidates the whole file, and the error message points at a line that is
+> often not the culprit.
+
+### "Two-way audio unavailable for this stream"
+
+This Frigate message says nothing about your stream. **Frigate disables two-way
+audio outside a secure context**, whatever the camera can do. Reach Home
+Assistant over HTTPS and it goes away. See section 8.
+
+---
+
+## 6. Exposing the camera in Home Assistant
+
+With Frigate, the entity already exists: `camera.doorbell`. Nothing to do.
+
+Without Frigate, add a **Generic Camera** through the UI (Settings → Devices &
+services → Add integration → Generic Camera):
+
+| Field | Value |
+|---|---|
+| Still image URL | `http://192.168.1.38:1984/api/frame.jpeg?src=doorbell` |
+| Stream source URL | `rtsp://127.0.0.1:8554/doorbell_webrtc` |
+| RTSP transport | TCP |
+
+The still-image URL is worth noting on its own: go2rtc serves a JPEG snapshot of
+any stream at `/api/frame.jpeg?src=NAME`, which is handy in notifications.
+
+---
+
+## 7. The Lovelace card
+
+### `frigate-card` or `advanced-camera-card`?
+
+Both work, and that is deliberate. From the card's own source:
+
+```ts
+// Keep the old name around for backwards compatibility.
+@customElement('frigate-card')
+class FrigateCard extends AdvancedCameraCard {}
+```
+
+`custom:frigate-card` is a **pure alias** — same class, same schema, no
+behavioural difference. A config written for one works verbatim with the other.
+`advanced-camera-card` is simply the current name.
+
+What does matter is the **installed version**, because the schema has moved:
+
+| Version | Note |
+|---|---|
+| ≥ 7.27.0 | requires Home Assistant ≥ 2026.2 |
+| 7.27.4 | latest stable at the time of writing |
+| 8.0.0-rc | **restructures automations**: `triggers:` required, `conditions:` separated, `actions_not` removed, microphone state split. Read its release notes first |
+
+The keys below are the 7.x ones. If the card rejects a key, its error names it —
+that almost always means an older version.
+
+### The card
 
 ```yaml
-type: custom:frigate-card
+type: custom:advanced-camera-card
 cameras:
   - camera_entity: camera.doorbell
     live_provider: go2rtc
+    go2rtc:
+      # The transcoded stream. Pointing at `doorbell` gives an empty view in
+      # webrtc mode, because the P4 emits MJPEG.
+      stream: doorbell_webrtc
+      modes:
+        - webrtc          # the only mode that carries audio
+    # THIS is what connects the doorbell press to the camera. Without it,
+    # pressing the button makes nothing appear: a camera card shows a camera,
+    # it does not listen to anything else.
+    triggers:
+      entities:
+        - binary_sensor.doorbell_p4_lvgl_bouton
+
+live:
+  # Have the view ready before the press, or you watch a spinner while the
+  # visitor waits.
+  preload: true
+  # `microphone` matters: it unmutes when the mic connects, without which you
+  # talk into a muted stream and conclude push-to-talk is broken.
+  auto_unmute:
+    - selected
+    - visible
+    - microphone
+  microphone:
+    always_connected: false
+    disconnect_seconds: 90
+
+view:
+  default: live
+  triggers:
+    show_trigger_status: true
+    filter_selected_camera: true
+    actions:
+      trigger: live          # the ring brings the view to live
+      untrigger: default     # and back afterwards
+    # How long the view stays live AFTER the ring clears. This is the one you
+    # want -- `interaction_seconds` means something else entirely: how long a
+    # user interaction suspends the triggers (300 s by default).
+    untrigger_seconds: 30
+
 menu:
   buttons:
     microphone:
-      enabled: true
-      type: momentary
+      enabled: true          # defaults to false; this is what creates the button
+      type: momentary        # hold to talk; 'toggle' for a latch
 ```
 
-Les règles de la section 1 restent valables : le transcodage H.264 est
-nécessaire tant que le P4 est en `codec: mjpeg`, et la ligne `#backchannel=1`
-séparée reste ce qui porte le push-to-talk.
+`binary_sensor.doorbell_p4_lvgl_bouton` assumes `name: doorbell-p4-lvgl` in your
+ESPHome config. Check the real entity id in **Developer Tools → States** — it is
+built from the device name, not the friendly name.
 
-### « Conversation bidirectionnelle non disponible pour ce flux »
+This is also where the 5-second hold on that sensor earns its keep: a 100 ms
+pulse would not give the card time to react.
 
-Ce message de l'interface Frigate ne dit rien du flux : **Frigate désactive la
-conversation bidirectionnelle hors contexte sécurisé**, quelle que soit la
-qualité de la négociation ONVIF derrière. Ses deux ports n'ont pas les mêmes
-droits :
+### Enum values, read from the card's schema
 
-| Port | Usage |
+Not guesses — these come from `src/config/schema/` in the card's repository:
+
+| Key | Accepted values |
 |---|---|
-| `5000` | HTTP direct, sans authentification — **pas de conversation bidirectionnelle** |
-| `8971` | HTTPS authentifié — celui qu'il faut |
+| `live.auto_unmute` | `selected`, `visible`, `microphone` |
+| `live.auto_mute` | `unselected`, `hidden`, `microphone` |
+| `view.triggers.actions.trigger` | `default`, `live`, `media`, `none`, `update` |
+| `view.triggers.actions.untrigger` | `default`, `none` |
+| `menu.buttons.microphone.type` | `momentary`, `toggle` |
 
-Ouvrez `https://<frigate>:8971` et acceptez l'exception de certificat
-(auto-signé). Publiez le port dans la configuration réseau de l'add-on s'il ne
-l'est pas, en même temps que `8555/tcp` et `8555/udp`, sans lesquels le
-navigateur ne peut établir la connexion WebRTC.
+> There is no `capabilities: force:` key. It appears in some configs found
+> online, but not in 7.27.4 nor on `main` — the schema has only `disable` and
+> `disable_except`. Copying it will fail validation.
 
-La même règle s'applique à la carte Lovelace : sur un Home Assistant en HTTP,
-le bouton micro reste inerte. C'est le navigateur qui refuse `getUserMedia()`,
-pas la carte.
+### A complete dashboard
 
-## 1. MJPEG : quel flux go2rtc utiliser ?
+```yaml
+type: vertical-stack
+cards:
+  - type: custom:advanced-camera-card
+    cameras:
+      - camera_entity: camera.doorbell
+        live_provider: go2rtc
+        go2rtc:
+          stream: doorbell_webrtc
+          modes: [webrtc]
+        triggers:
+          entities:
+            - binary_sensor.doorbell_p4_lvgl_bouton
+    live:
+      preload: true
+      auto_unmute: [selected, visible, microphone]
+    view:
+      default: live
+      triggers:
+        actions:
+          trigger: live
+          untrigger: default
 
-Le composant sort du **MJPEG** par défaut. WebRTC ne sait pas transporter du
-MJPEG, donc pour la carte Lovelace (mode `webrtc`, indispensable au
-push-to-talk) il faut pointer sur le flux **transcodé** déclaré dans
-`go2rtc.yaml` :
+  - type: entities
+    entities:
+      - entity: event.doorbell_p4_lvgl_sonnette
+        name: Last press
+      - entity: button.doorbell_p4_lvgl_sonner
+        name: Ring (test)
 
-| Codec sur le P4 | Flux go2rtc à utiliser dans la carte | Transcodage |
-|---|---|---|
-| `mjpeg` (défaut) | `doorbell_webrtc` | vidéo ré-encodée en H.264 par ffmpeg ; **audio copié tel quel** |
-| `h264` (option) | `doorbell` | aucun |
+  - type: entities
+    title: Audio
+    entities:
+      - entity: sensor.doorbell_p4_lvgl_niveau_micro
+        name: Microphone level
+      - entity: sensor.doorbell_p4_lvgl_paquets_audio_recus
+        name: Downstream voice received
+      - entity: button.doorbell_p4_lvgl_bip_de_test
+        name: Test beep
+```
 
-Le backchannel n'est jamais transcodé : dans les deux cas le G.711 traverse la
-chaîne intact, donc le push-to-talk se comporte pareil. Seul le coût CPU sur la
-machine Home Assistant change.
+### The WebRTC Camera card (AlexxIT)
 
-Dans les exemples ci-dessous, remplacez `doorbell_webrtc` par `doorbell` si vous
-êtes passé en `codec: h264`.
-
-> **Le mode d'affichage MJPEG ne transporte aucun son.** MJPEG est un format
-> vidéo seul : une carte réglée sur `modes: [mjpeg]` donnera l'image sans jamais
-> le micro, quel que soit l'état du backchannel côté RTSP. Pour entendre la
-> sonnette il faut `modes: [webrtc]`, donc de la vidéo H.264 — d'où le
-> transcodage ci-dessus. Et dans le lecteur, pensez à couper le mute : les
-> navigateurs démarrent muets tant qu'on n'a pas cliqué.
-
-### Vérifier que go2rtc reçoit bien le flux
-
-| URL | Ce que ça teste |
-|---|---|
-| `http://<go2rtc>:1984/api/frame.jpeg?src=doorbell` | une **image fixe**, un instantané unique — normal qu'elle ne bouge pas dans la page ; rechargez pour en obtenir une nouvelle |
-| `http://<go2rtc>:1984/api/stream.mjpeg?src=doorbell` | le flux **en direct** : c'est le vrai test que le P4 débite des trames |
-
-Puis, dans l'interface go2rtc, le bouton **webrtc** sur `doorbell_webrtc` : tant
-qu'il n'affiche pas d'image, aucune carte Lovelace ne fonctionnera. Ce test isole
-go2rtc de Home Assistant et évite de chercher au mauvais endroit.
-
-## 2. Prérequis
-
-| Élément | Pourquoi |
-|---|---|
-| go2rtc (add-on ou binaire) | ingère le RTSP, republie en WebRTC |
-| Accès à Home Assistant en **HTTPS** | le navigateur refuse `getUserMedia()` sur du HTTP non local — sans ça, **pas de micro**, quelle que soit la carte |
-| Carte Lovelace : `custom:webrtc-camera` (AlexxIT) ou `custom:advanced-camera-card` | bouton push-to-talk |
-
-`http://localhost` et `http://127.0.0.1` sont considérés comme des origines
-sûres par les navigateurs ; **une IP de LAN en clair ne l'est pas**. C'est de
-loin la cause n°1 des « le son descend mais je ne peux pas parler ».
-
-## 3. Exposer le flux comme entité caméra
-
-**La Generic Camera ne se configure plus en YAML.** Home Assistant l'a migrée
-vers l'interface : un bloc `camera: - platform: generic` dans
-`configuration.yaml` déclenche l'erreur « It's not possible to configure generic
-camera by adding `platform: generic` » et aucune entité n'est créée.
-
-**Paramètres → Appareils et services → + Ajouter une intégration →
-« Caméra générique »** (le nom est traduit ; à défaut, ouvrez directement
-`http://<ip-de-HA>:8123/config/integrations/dashboard/add?domain=generic`).
-
-| Champ | Valeur |
-|---|---|
-| URL de l'image fixe | `http://192.168.1.10:1984/api/frame.jpeg?src=doorbell` |
-| URL du flux | `rtsp://192.168.1.10:8554/doorbell_webrtc` |
-| Nom d'utilisateur / mot de passe | vides (go2rtc ne les demande pas) |
-| Vérifier le certificat SSL | décoché |
-| Protocole de transport RTSP | TCP |
-
-L'assistant affiche un aperçu avant de valider : s'il échoue là, le problème est
-dans go2rtc, pas dans Home Assistant.
-
-La vignette (`still_image_url`) peut venir du flux `doorbell` d'origine : en
-MJPEG, go2rtc extrait une image sans rien décoder.
-
-> **`192.168.1.10` est la machine qui fait tourner go2rtc, pas le P4.** C'est la
-> confusion la plus fréquente : le P4 ne sert que du RTSP sur le port 8554, il
-> n'a rien sur le 1984. Si vous ne connaissez pas l'adresse de go2rtc, lisez-la
-> dans les logs du P4 : `client connected from 192.168.1.38` — ce client, c'est
-> go2rtc.
-
-Avec l'intégration [WebRTC Camera d'AlexxIT](https://github.com/AlexxIT/WebRTC)
-installée via HACS, les flux déclarés dans `go2rtc.yaml` sont directement
-utilisables par leur nom (`doorbell`), sans entité caméra.
-
-## 4. Carte Lovelace — WebRTC Camera (AlexxIT)
-
-C'est la mise en œuvre la plus directe du push-to-talk :
+A far simpler card, with no camera-type restriction. Install **both** parts from
+HACS — the *WebRTC Camera* **integration**, not only the card. The integration
+provides the WebSocket proxy the card talks to; with the card alone you get a
+permanent "Custom element doesn't exist".
 
 ```yaml
 type: custom:webrtc-camera
-url: doorbell_webrtc     # 'doorbell' si le P4 est en codec: h264
-mode: webrtc             # seul mode qui gère l'audio bidirectionnel
+
+streams:
+  # 1 - watching. Deliberately WITHOUT `microphone`; see below.
+  - url: doorbell_webrtc
+    name: Watch
+    mode: webrtc
+
+  # 2 - talking. Select it to speak, go back to stream 1 to stop.
+  - url: doorbell_webrtc
+    name: Talk
+    mode: webrtc
+    media: video,audio,microphone
+
+ui: true               # built-in controls, and the stream selector
+muted: false           # you want to hear the visitor
+background: false      # stop the stream when the card is off screen
+intersection: 0.75
+poster: doorbell_webrtc
+```
+
+#### Pointing it at Frigate's go2rtc
+
+Left to itself, the integration downloads and runs **its own** go2rtc — which
+has never heard of `doorbell_webrtc`, so the card comes up empty. It has to use
+Frigate's instead.
+
+Usually it works this out by itself. Its config flow probes, in order:
+
+```python
+tests = await asyncio.gather(
+    utils.check_go2rtc(self.hass),                                  # http://localhost:1984/
+    utils.check_go2rtc(self.hass, "http://ccab4aaf-frigate:1984"),
+    utils.check_go2rtc(self.hass, "http://ccab4aaf-frigate-fa:1984"),
+    utils.check_go2rtc(self.hass, "http://ccab4aaf-frigate-beta:1984"),
+)
+```
+
+Those are the Frigate add-on's internal hostnames. If it found one at setup, you
+need no `server:` on the card at all.
+
+If it did not, set it — on the card as `server:`, or in the integration's
+options — to the hostname matching your add-on:
+
+| Add-on | `server:` |
+|---|---|
+| Frigate NVR | `http://ccab4aaf-frigate:1984` |
+| Frigate NVR (Full Access) | `http://ccab4aaf-frigate-fa:1984` |
+| Frigate NVR Beta | `http://ccab4aaf-frigate-beta:1984` |
+| Frigate in your own Docker/LAN | `http://<ip>:1984/` |
+
+Read the slug off the add-on's own URL: `/ccab4aaf_frigate` in the address bar
+is the plain *Frigate NVR* add-on, so `ccab4aaf-frigate` — **underscores become
+hyphens** in the hostname.
+
+Two mistakes worth naming, because both look reasonable:
+
+- **Not the add-on's web address.** `https://homeassistant.example/ccab4aaf_frigate`
+  is Home Assistant's ingress: an authenticated, path-rewriting proxy to
+  Frigate's own UI on port 5000. It is not the go2rtc API and cannot stand in
+  for it.
+- **The LAN IP is the fallback, not the first choice.** An add-on does not
+  publish port 1984 on the LAN unless you add it under the add-on's
+  *Configuration → Network*. The internal hostname needs no such thing.
+
+The name is resolved by the **Home Assistant backend**, in Python —
+`check_go2rtc()` uses `async_get_clientsession(hass)` — never by the browser. So
+a Docker-internal hostname is exactly right here, and no HTTPS or mixed-content
+question arises for this particular URL.
+
+#### This card has no push-to-talk button
+
+Worth knowing before choosing it, because it is the one real difference from the
+Advanced Camera Card. From `video-rtc.js`:
+
+```js
+if (this.media.includes('microphone')) {
+    const media = await navigator.mediaDevices.getUserMedia({audio: true});
+```
+
+The microphone is opened **when the stream connects**, not when you press
+anything. A stream carrying `microphone` therefore keeps your microphone live —
+and audible at the doorbell — for as long as that stream is selected.
+
+That is why the config above declares the stream twice. The stream selector *is*
+the talk button: "Watch" by default, "Talk" while you are speaking. It costs one
+click more than a momentary button, and in exchange nothing can leave your
+microphone open by accident.
+
+It is now a **privacy** choice rather than a functional one. A single stream
+with `media: video,audio,microphone` works as a normal intercom — you hear the
+visitor, the visitor hears you, no switching:
+
+```yaml
+type: custom:webrtc-camera
+url: doorbell_webrtc
+mode: webrtc
 media: video,audio,microphone
-muted: false
-ui: true
 ```
 
-`microphone` dans `media` est ce qui fait apparaître le bouton micro et
-déclenche la négociation du backchannel. Sans lui, le flux reste descendant.
+That only became true once `half_duplex` stopped muting the doorbell on "audio
+is arriving" and started muting on "the far end is audible" — see
+[§8](#8-two-way-audio). Before that, an always-open microphone kept the
+doorbell deaf for the whole call, and the two-stream form was the only way to
+hear anything. Take the two-stream form if you would rather your microphone not
+be live whenever the card is on screen; take the four lines above otherwise.
 
-## 4 ter. Pourquoi MJPEG et push-to-talk sont incompatibles en pratique
+##### If no selector appears
 
-C'est le point le plus important de cette page, et il n'apparaît dans aucune
-documentation : **la carte n'affiche le bouton micro que s'il y a UN SEUL
-consommateur sur le flux** ([advanced-camera-card
-#1888](https://github.com/dermotduffy/advanced-camera-card/issues/1888)).
+It has two conditions, and both must hold:
 
-Or la chaîne MJPEG en impose deux, par construction :
-
-```
-doorbell_webrtc:
-  - ffmpeg:doorbell#video=h264   <- transcode la vidéo, ne remonte PAS le backchannel
-  - rtsp://...#backchannel=1     <- source dédiée pour la voix montante
+```js
+stream.style.display = this.config.streams.length > 1 ? 'block' : 'none';
 ```
 
-ffmpeg ne tire que dans un sens : il ne peut pas porter le backchannel. Il faut
-donc une seconde source, et ces deux sources font deux consommateurs. Le bouton
-micro ne s'affiche pas. Ce n'est pas un réglage à trouver, c'est une impasse.
+…inside `renderCustomUI()`, which only runs when `config.ui` is true. So:
 
-Le bloc d'état du P4 la rend visible d'un coup d'œil :
+1. **`ui: true`** — without it the custom control bar is never built.
+2. **`streams:` with two entries.** `url:` and `streams:` are alternatives, and
+   `url:` yields a single stream, so `length > 1` is false and the control stays
+   hidden. A card that shows the picture perfectly with `url: doorbell_webrtc`
+   will never show a selector: it has nothing to select between.
 
+There is also a control that does **not** depend on `ui:` — the small
+semi-transparent mode label in the top-right corner of the picture:
+
+```js
+const mode = this.querySelector('.mode');
+mode.addEventListener('click', () => this.nextStream(true));
 ```
-clients=2 playing=2 | negotiated: video=NO audio=yes backchannel=NO
-```
 
-### La sortie : H.264 sur le P4
+Clicking it cycles streams too. Handy for checking the `streams:` list is being
+read at all: if that label does not cycle, the config never reached the card.
 
-En `codec: h264`, la vidéo est déjà dans le format que WebRTC attend. Plus de
-transcodage, donc plus de seconde source :
+If you would rather have a real hold-to-talk button, that is the Advanced Camera
+Card's `menu.buttons.microphone.type: momentary`, and the reason to keep it
+despite its heavier configuration.
+
+#### `mode: webrtc` is not optional here either
+
+`mse`, `hls` and `mjpeg` carry no microphone — the code above only runs on the
+WebRTC path. And point `url:` at `doorbell_webrtc`, never at `doorbell`: the
+latter is MJPEG, which WebRTC cannot carry, and it gives the backchannel up with
+`#backchannel=0`.
+
+Everything in [§8](#8-two-way-audio) still applies unchanged: HTTPS is required
+for the browser to hand over a microphone at all, and exactly one go2rtc source
+may hold the backchannel.
+
+---
+
+## 8. Two-way audio
+
+Talking *to* the visitor is the hardest part of this chain. Listening works with
+no special effort — the stream carries audio continuously, which also means the
+microphone is live whenever anything is watching.
+
+### `half_duplex` mutes on sound, not on packets
+
+There being no echo canceller, `half_duplex: true` silences the doorbell's
+microphone while the far end is talking. The question is how it knows.
+
+Not from packets arriving. G.711 has no silence suppression, so a client that
+holds its microphone open sends a continuous stream whether or not anybody is
+speaking — and the WebRTC Camera card does precisely that, opening
+`getUserMedia` when the stream connects rather than on a button. Muting on
+"audio is arriving" therefore muted the doorbell for the entire call: you could
+talk to the visitor and never hear a word back, with every level meter healthy
+and nothing in the logs.
+
+So the mute triggers on the far end being **audible** — a decoded peak above
+roughly −30 dBFS — with `talk_timeout` as the hangover after it. Room noise
+under an open microphone sits below that; speech does not.
+
+The practical consequence: an always-on microphone is fine now. Push-to-talk
+still costs nothing and is still the better choice on a speakerphone, but it is
+no longer the only arrangement that works.
+
+### HTTPS is not optional
+
+A browser grants microphone access (`getUserMedia`) **only in a secure
+context**: HTTPS, or `localhost`. A plain LAN address such as
+`http://192.168.1.38:8123` is not one. The button will appear and fail.
+
+This is a browser rule, not a limitation of this project or of any card. Three
+ways to satisfy it:
+
+- **Nabu Casa** (`https://….ui.nabu.casa`) or **Tailscale**
+  (`https://….ts.net`) — valid HTTPS, no certificate to manage;
+- open the page **from the machine running go2rtc**, where
+  `http://localhost:1984` *is* a secure context;
+- for a one-off test, mark the origin trusted in Chrome:
+  `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
+
+The trap: it is the **URL in the address bar** that decides. The same Home
+Assistant reached over `http://192.168.1.x:8123` will not have a microphone,
+however it is installed.
+
+### `backchannel: always`
+
+The most confusing failure in the whole chain, because everything works and
+nothing shows.
+
+ONVIF says to announce the `sendonly` track **only** to a client that sends
+`Require: www.onvif.org/ver20/backchannel`. But go2rtc, Frigate and the cards
+decide whether a camera can be talked to by **probing** the stream — an ordinary
+DESCRIBE, without that header. The track is not announced to the probe, so
+Frigate concludes "no two-way audio", the card hides the button, and nobody ever
+requests the backchannel.
+
+A capability that only exists on request is invisible to anything that does not
+already know it exists. Hence:
 
 ```yaml
-go2rtc:
-  streams:
-    doorbell:
-      - rtsp://USERNAME:PASSWORD@192.168.1.50:8554/doorbell
-```
-
-Une source, un consommateur, le backchannel porté par la même connexion. Le
-bouton micro apparaît. Et les saccades disparaissent avec le transcodage, qui
-en était la cause.
-
-Côté ESPHome :
-
-```yaml
-esp_video:
-  enable_h264: true
-
 rtsp_server:
-  video:
-    codec: h264
-    bitrate: 1500000
-    gop: 15
+  backchannel: always   # `auto` = strict ONVIF, the default
 ```
 
-**Ce que cela coûte** : `codec: h264` lit du YUV420 directement sur le
-périphérique V4L2 et ne peut donc pas partager la caméra avec `lvgl_camera_display`,
-qui a besoin de RGB565. **Vous perdez l'aperçu local sur l'écran.** Le composant
-refuse d'ailleurs la combinaison à la validation.
+The device's status block confirms which side you are on:
 
-La résolution doit aussi être un multiple de 16 sur les deux axes — 800x640
-convient, 800x600 non.
+```
+clients=2 playing=2 | negotiated across all sessions: video=yes audio=yes backchannel=yes
+```
 
-| | MJPEG + aperçu LVGL | H.264 sans aperçu |
-|---|---|---|
-| Image dans la carte | fluide en mode `mjpeg` | fluide en `webrtc` |
-| Son descendant | non (MJPEG n'a pas d'audio) | oui |
-| Push-to-talk | **impossible** | oui |
-| Aperçu sur l'écran du P4 | oui | non |
-| Charge CPU côté Home Assistant | transcodage permanent | nulle |
+and, when it is not negotiated, says which of the two cases you are in — nobody
+has asked to talk yet (normal), or somebody asked and gave up (worth looking at).
 
-## 4 bis. Les sept conditions du push-to-talk (Advanced Camera Card)
+### The Advanced Camera Card's conditions
 
-La documentation de la carte les pose comme **toutes obligatoires**. Il n'y a
-pas de dégradé : si une seule manque, le bouton micro n'est pas grisé, il
-**n'apparaît pas du tout** — ce qui donne l'impression d'un bug alors que c'est
-la configuration.
+The card's documentation lists these as **all mandatory**. If one is missing the
+microphone button is not greyed out — it does not appear at all, which looks
+like a bug and is configuration.
 
 | # | Condition |
 |---|---|
-| 1 | La caméra a une sortie audio |
-| 2 | go2rtc sait faire l'audio bidirectionnel avec elle |
-| 3 | Home Assistant est accessible en **HTTPS** |
-| 4 | **Caméra de type Frigate uniquement** — pas une Generic Camera |
-| 5 | **`live_provider: go2rtc` uniquement** — jamais `ha` |
-| 6 | **`modes: [webrtc]` uniquement** |
-| 7 | Le bouton micro est activé dans `menu.buttons` |
+| 1 | The camera has an audio output |
+| 2 | go2rtc can do two-way audio with it |
+| 3 | Home Assistant is reachable over **HTTPS** |
+| 4 | A **Frigate-type camera** — not a Generic Camera |
+| 5 | `live_provider: go2rtc` — never `ha` |
+| 6 | `modes: [webrtc]` only |
+| 7 | The microphone button is enabled in `menu.buttons` |
 
-La 6 a une conséquence qu'on découvre tard : **le mode `mjpeg` exclut le
-push-to-talk par construction**. Se rabattre sur MJPEG parce que le WebRTC
-saccade revient à renoncer à la parole. Corriger le WebRTC n'est donc pas un
-confort, c'est un prérequis.
+Condition 6 has a consequence people find late: **`mjpeg` mode excludes
+push-to-talk by construction**. Falling back to MJPEG because WebRTC stutters
+means giving up talking.
 
-La carte minimale à faire fonctionner AVANT d'ajouter déclencheurs et éléments
-personnalisés :
+### The remaining obstacle: two sources
 
-```yaml
-type: custom:advanced-camera-card
-cameras:
-  - camera_entity: camera.doorbell
-    live_provider: go2rtc
-    go2rtc:
-      modes:
-        - webrtc
-menu:
-  style: outside
-  buttons:
-    microphone:
-      enabled: true
-      type: momentary
+Even with all seven satisfied, the card only shows the microphone button when
+there is **one consumer** on the stream
+([advanced-camera-card #1888](https://github.com/dermotduffy/advanced-camera-card/issues/1888)).
+
+The MJPEG chain forces two, by construction: ffmpeg only pulls, so it cannot
+carry the backchannel, and a second source is needed for the voice. This is not
+a setting to find — it follows from the P4 emitting MJPEG.
+
+If the button does not appear, the fallback is go2rtc's own page, which has no
+such constraint (but still needs the secure context above):
+
+```
+http://localhost:1984/stream.html?src=doorbell_webrtc&mode=webrtc&media=video+audio+microphone
 ```
 
-Si le bouton micro n'apparaît pas avec ça, c'est la condition 4 : vérifiez que
-l'entité vient bien de l'intégration Frigate, et rechargez-la après tout ajout
-de caméra dans `frigate.yaml`.
+It embeds in a dashboard with a plain `iframe` card.
 
-## 5. Carte Lovelace — Advanced Camera Card
+---
 
-La carte que vous visez ([card.camera](https://card.camera/#/examples?id=doorbell)),
-avec le bouton en mode **momentané**, c'est-à-dire un vrai push-to-talk :
+## 9. The doorbell press
+
+A doorbell has four stages: **press → something rings → I see who it is → I
+answer.** Here is where each happens.
+
+| Stage | Who does it | Status |
+|---|---|---|
+| 1. Press | the P4 publishes `event…sonnette`, `binary_sensor…_bouton` and the `esphome.doorbell_pressed` event | nothing to do, it is in the YAML |
+| 2. **Something rings** | a Home Assistant **automation** | **you must write it — section 10** |
+| 3. I see who it is | the card's `triggers:` (section 7) and/or the notification | section 7 |
+| 4. I answer | two-way audio | listening: yes. Talking: needs HTTPS, section 8 |
+
+Stage 2 is the one everyone forgets, and it is the one that makes the whole
+thing feel broken. **Home Assistant does not chime on its own.** The P4 does its
+job scrupulously — it announces the press three different ways — but until
+something listens and makes a noise, the press only changes a value in a
+database.
+
+---
+
+## 10. Automations
+
+### Which trigger
+
+| Trigger | Why |
+|---|---|
+| **`event` entity** | Home Assistant's **native** doorbell entity. It carries a timestamp, appears in the graphical editor, and a press cannot be missed |
+| `binary_sensor` | for conditions and cards. Held 5 s, so it is visible in Developer Tools → States |
+| `esphome.doorbell_pressed` | a raw bus event, if you would rather not depend on an entity id |
 
 ```yaml
-type: custom:advanced-camera-card
-cameras:
-  - camera_entity: camera.sonnette
-    live_provider: go2rtc
-    go2rtc:
-      url: http://192.168.1.10:1984
-      stream: doorbell_webrtc   # 'doorbell' si le P4 est en codec: h264
-      modes:
-        - webrtc          # seul mode compatible audio bidirectionnel
-live:
-  microphone:
-    always_connected: false   # true = pas de coupure du flux au 1er appui
-  auto_unmute:
-    - microphone
-menu:
-  buttons:
-    microphone:
-      enabled: true
-      type: momentary       # maintenir pour parler ; 'toggle' pour un verrou
+# Recommended: the event entity. Any state change is a new press.
+triggers:
+  - trigger: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
 ```
 
-`type: momentary` est le comportement PTT ; `toggle` transforme le bouton en
-interrupteur marche/arrêt.
+```yaml
+# Alternative: the bus event, if you would rather not look up an entity id.
+triggers:
+  - trigger: event
+    event_type: esphome.doorbell_pressed
+```
 
-> La documentation de la carte indique que l'audio bidirectionnel n'est
-> officiellement supporté que pour les caméras de type Frigate. Avec une caméra
-> générique il faut renseigner explicitement `go2rtc.url` et `go2rtc.stream`
-> comme ci-dessus. Si le bouton micro reste inactif, repliez-vous sur
-> `custom:webrtc-camera`, qui n'a pas cette restriction.
+Find the real entity id in **Developer Tools → States**, filtering on
+`sonnette`. ESPHome builds it from the device name, not the friendly name. The
+notification service is `notify.mobile_app_<phone>`; the exact list is under
+Developer Tools → Actions.
 
-## 6. Automatisation : appui sur le bouton → notification
+> **Check the press arrives before writing anything.** Filter on `sonnette` in
+> Developer Tools → States and press the button: the event entity's timestamp
+> must change. If it does not, the automation is not the problem — look at
+> `esphome logs`, where the line `ring: sequence declenchee` tells you whether
+> the press even reached the script.
 
-Le bouton est géré par ESPHome, donc côté Home Assistant il ne reste que la
-notification. **Sans cette automatisation, rien n'est envoyé** : le capteur
-change d'état et personne ne l'écoute. C'est la pièce qu'on oublie le plus
-souvent, parce que tout le reste de la chaîne a l'air de fonctionner.
+### Chime and notification
 
-> À ne pas confondre avec le `notifications:` de `frigate.yaml` : celui-là
-> notifie sur **détection d'objet** et demande un abonnement depuis l'interface
-> de Frigate. Il ne connaît pas le bouton de la sonnette.
-
-### Trouver les deux identifiants
-
-Les deux lignes qui échouent silencieusement si elles sont fausses :
-
-- **`entity_id` du capteur.** ESPHome le construit à partir du nom de
-  l'appareil, pas du `friendly_name` que vous croyez : selon la configuration
-  cela donne `binary_sensor.doorbell_lvgl_bouton` ou
-  `binary_sensor.doorbell_p4_bouton`. Lisez-le dans **Outils de développement →
-  États** en filtrant sur `bouton`, et copiez-le tel quel.
-- **Le service de notification.** Il vaut `notify.mobile_app_<nom-du-mobile>`.
-  La liste exacte est dans **Outils de développement → Actions**, en tapant
-  `notify.`.
+A notification is only seen if the phone is in your hand. To actually *ring*,
+you need a speaker.
 
 ```yaml
-automation:
-  - alias: Sonnette - notification
-    trigger:
-      - platform: state
-        entity_id: binary_sensor.doorbell_lvgl_bouton
-        to: "on"
-    action:
-      - action: notify.mobile_app_telephone
+alias: Doorbell - chime and notify
+mode: single
+max_exceeded: silent
+triggers:
+  - trigger: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
+actions:
+  # Quieter at night.
+  - action: media_player.volume_set
+    target:
+      entity_id:
+        - media_player.kitchen
+        - media_player.bedroom
+    data:
+      volume_level: >-
+        {{ 0.6 if is_state('sun.sun', 'below_horizon') else 0.75 }}
+    continue_on_error: true
+
+  - parallel:
+      - action: media_player.play_media
+        continue_on_error: true
+        target:
+          entity_id: media_player.kitchen
         data:
-          title: "Sonnette"
-          message: "Quelqu'un est à la porte"
+          # A file in /config/www/, served under /local/.
+          media_content_id: /local/sounds/doorbell.mp3
+          media_content_type: music
+
+      - action: notify.all_phones
+        continue_on_error: true
+        data:
+          title: Doorbell
+          message: Someone is at the door
           data:
-            # Vignette prise via go2rtc au moment de l'appui
-            image: /api/camera_proxy/camera.sonnette
+            # Tapping the notification body opens the view (Android).
+            clickAction: /lovelace/doorbell
+            # `tag` makes a second press REPLACE the notification instead of
+            # stacking another one.
+            tag: doorbell-ringing
+            channel: Doorbell
+            importance: high
+            ttl: 0
+            image: /api/camera_proxy/camera.doorbell
             actions:
               - action: URI
-                title: "Voir et parler"
-                # Ouvre le tableau de bord contenant la carte caméra
-                uri: /lovelace/sonnette
-            push:
-              interruption-level: time-sensitive
-            channel: doorbell
-            importance: high
+                title: Answer
+                uri: /lovelace/doorbell
+              - action: IGNORE
+                title: Ignore
+
+  # Anti-spam: an impatient visitor does not launch three overlapping chimes.
+  - delay:
+      seconds: 15
 ```
 
-L'action `URI` ouvre le tableau de bord directement dans l'application, avec la
-carte caméra et son bouton PTT.
+Three details that separate a pleasant doorbell from an unbearable one:
 
-Tableau de bord minimal associé :
+- **`continue_on_error: true` everywhere.** A television that is switched off
+  must not stop the kitchen chime from sounding.
+- **`tag:` on the notification.** Without it, three presses give three stacked
+  notifications; with it, the last replaces the previous.
+- **`mode: single` + `max_exceeded: silent` + the trailing delay.** Without
+  them, three presses start three overlapping sequences.
+
+A spoken announcement instead of a chime:
 
 ```yaml
-views:
-  - title: Sonnette
-    path: sonnette
-    cards:
-      - type: custom:advanced-camera-card
+  - action: tts.speak
+    target:
+      entity_id: tts.piper
+    data:
+      cache: true
+      media_player_entity_id: media_player.kitchen
+      message: Someone is at the door
+```
+
+To test without going to the door: **Settings → Automations → ⋮ → Run**. Or the
+device's own `button…sonner`, which runs exactly the same sequence as a press.
+
+### Ringing until someone answers
+
+The [dahua-vto-on-home-assistant](https://github.com/felipecrs/dahua-vto-on-home-assistant)
+project makes a point worth stealing: **a doorbell is not an event, it is a
+state.** "Someone is waiting at the door" lasts until you answer or give up.
+
+Our `event` and 5-second `binary_sensor` say "a press happened", not "someone is
+still waiting" — which is why the chime above rings once. To ring until
+answered, add a helper (Settings → Devices & services → Helpers → Toggle) named
+`input_boolean.doorbell_calling`, set it at the start of the automation, and:
+
+```yaml
+  - repeat:
+      while:
+        - condition: state
+          entity_id: input_boolean.doorbell_calling
+          state: "on"
+        - condition: template
+          value_template: "{{ repeat.index <= 6 }}"
+      sequence:
+        - action: media_player.play_media
+          continue_on_error: true
+          target:
+            entity_id: media_player.kitchen
+          data:
+            media_content_id: /local/sounds/doorbell.mp3
+            media_content_type: audio/mp3
+        - delay:
+            seconds: 5
+  - action: input_boolean.turn_off
+    target:
+      entity_id: input_boolean.doorbell_calling
+```
+
+Clearing the helper — from the card, or from an "Answer" button — stops the
+chime.
+
+---
+
+## 11. Opening the page automatically
+
+**Home Assistant cannot make a browser change page.** There is no native service
+for it. An automation acts on devices — speakers, lights, phones — not on the
+tab in front of you.
+
+What a notification's `uri:` really does is *arm an action*: the page opens when
+you **tap** it, not the instant it rings. And the card's `triggers:` block
+switches a card that is *already on screen*; it does not go and fetch it.
+
+### Check the view exists first
+
+`/lovelace/doorbell` only exists if a view has exactly the **URL path**
+`doorbell`. That is set in the dashboard → ✏️ → the view's tab → ⚙️ → "URL". It
+is not the view's title: a view titled "Doorbell" may well have the path
+`view_2`. Type the address by hand; if you land on an empty page or on the
+default dashboard, the path is wrong and no notification will lead there.
+
+On a dashboard other than the default, the full path includes its name:
+`/doorbell-dashboard/doorbell`. Navigate to the view and copy the address bar.
+
+### The three ways
+
+| | How | Automatic? |
+|---|---|---|
+| Notification with a `URI` action | you tap the notification | no — a gesture |
+| A card already on screen, with `triggers:` | it switches to live on its own | yes, but only if the page is already open |
+| **Browser Mod** or **Fully Kiosk** | opens a window, or navigates, on a named browser | **yes, genuinely** |
+
+### Browser Mod
+
+[Browser Mod](https://github.com/thomasloven/hass-browser_mod) (via HACS) gives
+Home Assistant control of a specific browser — what you want for a wall tablet
+or a desk PC.
+
+**HACS only does half the installation**, and it does not say so. After the
+restart Browser Mod appears nowhere, and it looks like the install failed. The
+missing step:
+
+1. HACS → Browser Mod → **Download**;
+2. **restart** Home Assistant (a config reload is not enough);
+3. **Settings → Devices & services → "+ Add integration" → "Browser Mod"** ←
+   *this is the step people miss*;
+4. hard-refresh the browser (**Ctrl+Shift+R**), or the frontend module is not
+   loaded and nothing registers.
+
+Then each browser you want to control must **register itself**: open Home
+Assistant on it, go to the **Browser Mod** panel, and enable **Register**. Give
+it a readable name — that is what the automation targets. An unregistered
+browser is not a visible error: the automation runs, finds no target, and
+nothing happens.
+
+```yaml
+alias: Doorbell - show the camera
+mode: single
+triggers:
+  - trigger: state
+    entity_id: event.doorbell_p4_lvgl_sonnette
+actions:
+  # A window over whatever is on screen: nothing to dismiss, it closes itself.
+  - action: browser_mod.popup
+    data:
+      title: Someone is at the door
+      size: wide
+      timeout: 60000
+      dismissable: true
+      browser_id:
+        - hall-tablet
+      content:
+        type: custom:advanced-camera-card
         cameras:
-          - camera_entity: camera.sonnette
+          - camera_entity: camera.doorbell
             live_provider: go2rtc
             go2rtc:
-              url: http://192.168.1.10:1984
               stream: doorbell_webrtc
               modes: [webrtc]
+        live:
+          preload: true
+          auto_unmute: [selected, visible, microphone]
         menu:
           buttons:
             microphone:
@@ -481,43 +927,87 @@ views:
               type: momentary
 ```
 
-## 7. Vérifier que l'audio bidirectionnel est bien négocié
+A popup beats navigation: it does not abandon what you were doing, and it closes
+on its own. `browser_mod.navigate` exists if you prefer to change page outright.
 
-1. Ouvrez l'interface de go2rtc : `http://192.168.1.10:1984`.
-2. Sur le flux `doorbell`, cliquez **probe**. Vous devez voir **trois** pistes :
+### Fully Kiosk
 
-   ```
-   video, recvonly, JPEG          (H264 si le P4 est en codec: h264)
-   audio, recvonly, PCMU/8000
-   audio, sendonly, PCMU/8000     <-- le backchannel
-   ```
+If your wall tablet runs Fully Kiosk Browser, it is simpler:
 
-   Sondez le flux **`doorbell`** (la source RTSP), pas `doorbell_webrtc`.
+```yaml
+  - action: fully_kiosk.load_url
+    target:
+      device_id: <your tablet>
+    data:
+      url: https://YOUR-HA-HOST/lovelace/doorbell
+    continue_on_error: true
+```
 
-   Si la troisième ligne manque, go2rtc n'a pas demandé le backchannel : c'est
-   presque toujours un `#` de trop dans l'URL (voir `go2rtc/go2rtc.yaml`).
-3. Passez `log: {rtsp: trace}` dans go2rtc et relancez : la requête `DESCRIBE`
-   doit porter l'en-tête `Require: www.onvif.org/ver20/backchannel`, et le SDP
-   renvoyé par le P4 doit contenir `a=sendonly`.
+---
 
-## 8. Diagnostic
+## 12. Diagnosing the audio
 
-| Symptôme | Cause probable |
+Do not start in Home Assistant. The device answers on its own, and that
+separates a hardware fault from a chain fault in two minutes.
+
+1. **Test beep** — the `Bip de test` button, or the on-screen one. No beep means
+   the fault is the speaker, not the network.
+2. **Local loopback** — the `Test audio` switch. Speak in front of the doorbell:
+   you should hear yourself. If you do, **the device's whole audio chain is
+   sound** and what remains is upstream. It stops itself after two minutes.
+3. **Level** — the `Niveau micro` sensor, in dBFS.
+
+Reading the microphone level:
+
+| Reading | Diagnosis |
 |---|---|
-| go2rtc ne se connecte pas au P4 | l'IP a changé : réservation DHCP, ou passez au nom mDNS (étape 0) |
-| WebRTC : écran noir, et les logs du P4 ne montrent qu'un `SETUP trackID=1` | go2rtc a jeté la vidéo JPEG, que WebRTC ne sait pas transporter : il faut le transcodage `ffmpeg:...#video=h264` (étape 1) |
-| `probe` sur `doorbell_webrtc` affiche encore `JPEG` | le transcodage ffmpeg échoue — retirez `#hardware` si la machine n'a pas d'encodeur VA-API |
-| Le port 1984 ne répond pas | vous visez le P4 au lieu de go2rtc : le P4 n'expose que le RTSP sur 8554 |
-| Image OK puis clients refusés (`refusing ...: already serving 2 clients`) | la chaîne MJPEG prend 2 sessions RTSP : passez `max_clients: 3` dans le YAML ESPHome |
-| Le push-to-talk marche une fois puis plus jamais | deux sources go2rtc demandent le backchannel : une seule doit l'avoir (voir `go2rtc/go2rtc.yaml`) |
-| `Custom element not found: ...` | la carte Lovelace n'est pas installée — passez par HACS, puis Ctrl+Shift+R |
-| « Échec de l'initialisation de la caméra » (Advanced Camera Card) | le `camera_entity` référencé n'existe pas : créez la Caméra générique par l'interface (étape 3) |
-| Bouton micro absent ou inerte | Home Assistant en HTTP → passez en HTTPS |
-| Image OK, aucun son montant | pas de `microphone` dans `media` (webrtc-camera) |
-| Image OK, on ne peut pas parler | backchannel non négocié → étape 7 |
-| Le son se coupe quand on parle | normal : `half_duplex: true` coupe le micro pendant l'émission |
-| Larsen | l'ampli reste alimenté : câblez la broche `SD` (voir `docs/hardware.md`) |
-| Image saccadée ou verte au démarrage (H.264) | le client attend la première trame clé — au plus `gop / framerate` secondes |
-| Image fluide mais CPU élevé sur la machine HA | transcodage MJPEG → H.264 ; passez le P4 en `codec: h264` |
-| Pas d'image dans la carte, mais `doorbell` visible dans go2rtc | la carte pointe sur `doorbell` alors que le P4 est en MJPEG : utilisez `doorbell_webrtc` |
-| `RTSP: unsupported transport` | un client force l'UDP ; ce serveur est en TCP interleaved uniquement |
+| `Micro actif` in fault | the source delivers **nothing**: wrong `microphone_id`, codec not started, wrong I2S pins |
+| −100 dBFS while speaking | the source delivers **silence**: wrong I2S slot, dead capsule, gain at zero |
+| −60 to −40 dBFS | it hears but faintly: raise `mic_gain_db` (codec) or `gain:` |
+| −30 to −6 dBFS | correct |
+| above −3 dBFS | clipping, lower the gain |
+
+For the **downstream** voice, the `Paquets audio recus` counter settles it alone:
+
+| While you press talk | Where the fault is |
+|---|---|
+| stays at 0 | nothing reaches the P4: backchannel not negotiated, or go2rtc — section 8 |
+| it rises, but you hear nothing | the device receives fine: amplifier, volume, or speaker (run the test beep) |
+
+And on the output side, `Octets audio proposes` versus `acceptes`:
+
+| The two counters | Meaning |
+|---|---|
+| offered = 0 | nothing was ever sent to the speaker — press the test beep first |
+| offered rises, **accepted stays at 0** | the speaker component refuses everything: stopped, or the format displeases it |
+| both rise together, still no sound | the audio left the software: amplifier GPIO, codec volume, or wiring |
+| accepted < offered | it cannot keep up; the sound will be chopped |
+
+---
+
+## 13. Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| go2rtc cannot connect to the P4 | the IP changed: DHCP reservation, or use the mDNS name (section 1) |
+| WebRTC shows a black screen, and the P4 logs only a `SETUP trackID=1` | go2rtc discarded the JPEG video, which WebRTC cannot carry: the `ffmpeg:…#video=h264` transcode is missing (section 4) |
+| **Video only works when the audio is disabled on the device** | the same missing transcode, seen from the other side. With audio, WebRTC negotiates successfully on the G.711 track alone and the JPEG video is simply left out — sound, no picture. Remove the audio and the negotiation finds nothing it can carry, the viewer falls back to MJPEG, and the picture returns. Nothing is wrong with the doorbell: add the `ffmpeg:…#video=h264` stream and point the card at it (section 4) |
+| `probe` on `doorbell_webrtc` still shows `JPEG` | the ffmpeg transcode is failing — drop `#hardware` if the machine has no VA-API encoder |
+| Port 1984 does not answer | you are aiming at the P4 instead of go2rtc: the P4 only serves RTSP on 8554 |
+| Image fine, then clients refused (`refusing …: already serving 2 clients`) | the MJPEG chain takes 2 RTSP sessions: raise `max_clients` |
+| Push-to-talk worked once and never again | two go2rtc sources are requesting the backchannel; only one may |
+| No microphone button, even over HTTPS | the P4 is announcing the track on request only: set `backchannel: always` (section 8) |
+| Microphone button present but silent, or permission denied | not a secure context — check the URL in the address bar is HTTPS |
+| `Custom element not found: …` | the Lovelace card is not installed — HACS, then Ctrl+Shift+R |
+| "Camera initialisation failed" (Advanced Camera Card) | the `camera_entity` does not exist (section 6) |
+| Image fine, no upstream sound | no `microphone` in `media` (webrtc-camera) |
+| The sound cuts out when you talk | expected: `half_duplex: true` mutes the microphone while the far end speaks |
+| Howling | the loopback monitor is on, or the amplifier stays powered — see `hardware.md` |
+| Frames lost at a higher resolution, fine at a lower one (`tx: N packets, M frames dropped` climbing in the status block) | the transmit ring cannot hold a frame of that size. A 1080p JPEG runs 100–150 kB against 40–60 kB at 960p, and an oversized frame is dropped **whole** rather than torn. Raise `tx_buffer_size` to roughly two frames — `512kB` for 1080p — and add `tx_buffer_psram: true` so it does not come out of internal RAM |
+| Smooth image but high CPU on the HA machine | the MJPEG → H.264 transcode, unavoidable for WebRTC. Lower `framerate` or `jpeg_quality`, or watch in `mjpeg`/`mse` mode |
+| No image in the card, but `doorbell` visible in go2rtc | the card points at `doorbell`; use `doorbell_webrtc` |
+| The image freezes while the stream is active | the LVGL preview was switched off without handing the V4L2 dequeue back — see `set_drive_camera()` |
+| `RTSP: unsupported transport` | a client is forcing UDP; this server is TCP-interleaved only |
+| `Unable to find action with the name 'rtsp_server.…'` | ESPHome is compiling an old copy: wrong `ref:`, or the 24 h cache. Set `refresh: 0s` and delete `.esphome/external_components` |
+| `codec: h264` rejected at compile time | intentional — H.264 was removed, see the README |
+| Audio never starts, and the I2C scan shows no device at `0x40` | the board has no ES7210, and `fdaudio` looks for one at that address — its failure takes the speaker down too. Set `mic_source: output_codec` to capture through the ES8311's own ADC — see `hardware.md` |

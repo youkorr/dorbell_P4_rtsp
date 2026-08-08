@@ -17,6 +17,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "esp_heap_caps.h"
 #include "esp_netif.h"
 #include "esphome/components/network/util.h"
 #include "esphome/core/hal.h"
@@ -28,9 +29,6 @@ namespace rtsp_server {
 static const char *const TAG = "rtsp_server";
 static const char *const SERVER_NAME = "ESPHome-RTSP/1.0 (ESP32-P4)";
 
-/// Holds roughly one large key frame plus a margin, so a burst of packets can
-/// be queued while the network task is busy writing an earlier one.
-static constexpr size_t TX_RING_BYTES = 192 * 1024;
 static constexpr int SELECT_TIMEOUT_MS = 5;
 static constexpr uint32_t SESSION_TIMEOUT_MS = 120000;
 
@@ -95,12 +93,6 @@ static std::string default_local_address() {
   return "0.0.0.0";
 }
 
-static std::string hex_byte(uint8_t value) {
-  char buf[3];
-  snprintf(buf, sizeof(buf), "%02x", value);
-  return std::string(buf);
-}
-
 // ---------------------------------------------------------------------------
 // Component lifecycle
 // ---------------------------------------------------------------------------
@@ -115,20 +107,31 @@ void RTSPServer::set_credentials(const std::string &user, const std::string &pas
 }
 
 void RTSPServer::setup() {
-  this->tx_ring_ = xRingbufferCreate(TX_RING_BYTES, RINGBUF_TYPE_NOSPLIT);
+  // The transmit ring is what absorbs the gap between an encoder producing a
+  // whole JPEG at once and a TCP link draining it steadily. Too small and
+  // send_rtp() drops entire frames the moment a frame outruns the link, which
+  // is the ceiling on resolution long before the encoder or the sensor is.
+  //
+  // Hence: sized from YAML, and optionally out of PSRAM. Internal RAM is the
+  // scarce resource on a board also running a camera and a display, while PSRAM
+  // usually sits nearly empty -- and this buffer is streamed through, never
+  // random-accessed, so the slower memory costs nothing that matters.
+  const uint32_t caps = MALLOC_CAP_8BIT | (this->tx_ring_psram_ ? MALLOC_CAP_SPIRAM : MALLOC_CAP_INTERNAL);
+  this->tx_ring_ = xRingbufferCreateWithCaps(this->tx_ring_bytes_, RINGBUF_TYPE_NOSPLIT, caps);
   if (this->tx_ring_ == nullptr) {
-    ESP_LOGE(TAG, "failed to allocate the %u KiB transmit ring buffer",
-             static_cast<unsigned>(TX_RING_BYTES / 1024));
+    ESP_LOGE(TAG,
+             "failed to allocate the %u KiB transmit ring buffer in %s. Lower 'tx_buffer_size', or set "
+             "'tx_buffer_psram: true' to take it out of PSRAM instead (%u KiB free there).",
+             static_cast<unsigned>(this->tx_ring_bytes_ / 1024), this->tx_ring_psram_ ? "PSRAM" : "internal RAM",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     this->mark_failed();
     return;
   }
+  ESP_LOGCONFIG(TAG, "transmit ring buffer: %u KiB in %s", static_cast<unsigned>(this->tx_ring_bytes_ / 1024),
+                this->tx_ring_psram_ ? "PSRAM" : "internal RAM");
 
-  if (this->video_config_.codec == VideoCodec::H264) {
-    this->h264_packetizer_ = make_unique<H264Packetizer>(this->packet_size_, 96, random_uint32());
-  } else {
-    // RFC 2435 assigns JPEG the static payload type 26.
-    this->mjpeg_packetizer_ = make_unique<MjpegPacketizer>(this->packet_size_, 26, random_uint32());
-  }
+  // RFC 2435 assigns JPEG the static payload type 26.
+  this->mjpeg_packetizer_ = make_unique<MjpegPacketizer>(this->packet_size_, 26, random_uint32());
 
   const uint8_t audio_payload_type = static_cast<uint8_t>(this->audio_config_.codec);
   this->audio_packetizer_ = make_unique<G711Packetizer>(G711_SAMPLES_PER_PACKET, audio_payload_type, random_uint32());
@@ -224,11 +227,6 @@ void RTSPServer::dump_config() {
   // known once the pipeline opens the device; it is logged there.
   if (!this->video_enabled_) {
     ESP_LOGCONFIG(TAG, "  Video: disabled");
-  } else if (this->video_config_.codec == VideoCodec::H264) {
-    ESP_LOGCONFIG(TAG, "  Video: H.264 @ %" PRIu32 " fps, %" PRIu32 " bps, GOP %" PRIu32 " (%s -> %s)",
-                  this->video_config_.framerate, this->video_config_.bitrate, this->video_config_.gop,
-                  this->video_config_.device.c_str(), this->video_config_.encoder_device.c_str());
-    ESP_LOGCONFIG(TAG, "         go2rtc will pass this through to WebRTC without transcoding");
   } else {
     ESP_LOGCONFIG(TAG, "  Video: MJPEG quality %u @ %" PRIu32 " fps", this->video_config_.jpeg_quality,
                   this->video_config_.framerate);
@@ -249,32 +247,7 @@ void RTSPServer::dump_config() {
 // Pipeline callbacks (run on the video / audio tasks)
 // ---------------------------------------------------------------------------
 
-void RTSPServer::cache_parameter_sets_(const uint8_t *au, size_t len) {
-  size_t pos = 0;
-  AnnexBNal nal{};
-
-  while (next_annexb_nal(au, len, &pos, &nal)) {
-    const uint8_t type = static_cast<uint8_t>(nal.data[0] & 0x1F);
-    if (type != 7 && type != 8)
-      continue;
-
-    LockGuard guard(this->parameter_sets_lock_);
-    std::vector<uint8_t> &target = (type == 7) ? this->sps_ : this->pps_;
-    if (target.size() != nal.size || std::memcmp(target.data(), nal.data, nal.size) != 0)
-      target.assign(nal.data, nal.data + nal.size);
-  }
-}
-
 void RTSPServer::on_video_frame_(const uint8_t *frame, size_t len, uint32_t timestamp) {
-  if (this->video_config_.codec == VideoCodec::H264) {
-    // Always refresh SPS/PPS: DESCRIBE needs them even when nobody is streaming.
-    this->cache_parameter_sets_(frame, len);
-    if (this->active_streams_ == 0)
-      return;
-    this->h264_packetizer_->packetize(frame, len, timestamp, this);
-    return;
-  }
-
   if (this->active_streams_ == 0)
     return;
   if (!this->mjpeg_packetizer_->packetize(frame, len, timestamp, this)) {
@@ -391,9 +364,29 @@ void RTSPServer::log_status_() {
   const auto yn = [](bool b) { return b ? "yes" : "NO "; };
 
   ESP_LOGI(TAG, "--- status ------------------------------------------------");
-  ESP_LOGI(TAG, "  clients=%u playing=%u | negotiated by the last client: video=%s audio=%s backchannel=%s",
+  // The mask is the OR across every PLAYing session, not the last one to
+  // arrive: with a transcoding chain the device serves two connections, and
+  // reporting only the most recent made the backchannel look absent while
+  // another session held it.
+  ESP_LOGI(TAG, "  clients=%u playing=%u | negotiated across all sessions: video=%s audio=%s backchannel=%s",
            static_cast<unsigned>(this->client_count_), static_cast<unsigned>(this->active_streams_),
            yn((mask & 0x01) != 0), yn((mask & 0x02) != 0), yn((mask & 0x04) != 0));
+
+  // Why the backchannel is absent, which is a different question from whether
+  // it is absent -- and the two have opposite fixes.
+  if ((mask & 0x04) == 0) {
+    if (this->describes_with_backchannel_ == 0) {
+      ESP_LOGI(TAG,
+               "         no client has ASKED to talk yet (%" PRIu32 " DESCRIBEs, none with the ONVIF Require "
+               "header). Normal until a viewer opens the stream with a microphone -- nothing to fix here.",
+               this->describes_total_);
+    } else {
+      ESP_LOGW(TAG,
+               "         %" PRIu32 " client(s) asked for the backchannel but never set the track up: look at "
+               "the SDP and at the client, not at the wiring",
+               this->describes_with_backchannel_);
+    }
+  }
   ESP_LOGI(TAG, "  video: %" PRIu32 " encoded, %" PRIu32 " skipped | tx: %" PRIu32 " packets, %" PRIu32
                 " frames dropped",
            this->video_.frames_encoded(), this->video_.frames_dropped(), this->tx_overflows_,
@@ -402,17 +395,80 @@ void RTSPServer::log_status_() {
     ESP_LOGI(TAG, "  audio: mic %" PRIu32 " packets sent | backchannel %" PRIu32 " received, %" PRIu32 " dropped%s",
              this->audio_.packets_sent(), this->audio_.packets_received(), this->audio_.packets_dropped(),
              this->audio_.is_talking() ? "  <-- TALKING NOW" : "");
+
+    // The microphone, measured rather than assumed. Three distinct faults look
+    // identical from Home Assistant ("I hear nothing") and are told apart here:
+    //   samples frozen      -> the source delivers no data at all (wrong pins,
+    //                          codec not started, another consumer took it)
+    //   samples rising,     -> the source delivers digital silence (mic muted,
+    //   level -100 dB          gain at zero, wrong I2S slot, dead capsule)
+    //   level around -60 dB -> it works, it is just quiet: raise the gain
+    // Two readings, because one of them is almost always misleading on its own.
+    // `now` decays in a second, so unless you happen to be speaking at the exact
+    // moment this line is printed it shows room tone. `max/60s` is the loudest
+    // thing heard in the last minute -- that is the one that separates a quiet
+    // room from a microphone that hears nothing.
+    ESP_LOGI(TAG, "  mic:   %" PRIu32 " samples read (%s), now %.1f dBFS %s  max/60s %.1f dBFS",
+             this->audio_.mic_samples(), this->audio_.mic_alive() ? "flowing" : "STOPPED",
+             static_cast<double>(this->audio_.mic_level_db()), this->audio_.mic_level_bar(),
+             static_cast<double>(this->audio_.mic_peak_hold_db()));
+
+    // Speech should reach -30..-6 dBFS. Much below that and the far end hears
+    // nothing, however healthy every counter above may look.
+    const float hold = this->audio_.mic_peak_hold_db();
+    if (this->audio_.mic_alive() && hold > -100.0f && hold < -40.0f) {
+      ESP_LOGW(TAG,
+               "         the loudest sound of the last minute was %.1f dBFS -- far too quiet. Speech should "
+               "reach -30..-6 dBFS. Raise the gain (the codec's own first, then 'gain:' here).",
+               static_cast<double>(hold));
+    } else if (hold > -1.0f) {
+      // Pinned at full scale is not "loud and clear", it is a square wave. The
+      // usual cause is not the gain at all but the loopback monitor closing an
+      // acoustic loop -- which is why that is named first.
+      ESP_LOGW(TAG,
+               "         the microphone is CLIPPING (%.1f dBFS). %s",
+               static_cast<double>(hold),
+               this->audio_.loopback()
+                   ? "The loopback monitor is on and the microphone is hearing the speaker: that is acoustic "
+                     "feedback, not a level problem. Turn the monitor off."
+                   : "Lower 'gain:', or the codec's own gain.");
+    }
+    if (this->audio_.has_speaker()) {
+      ESP_LOGI(TAG, "  spk:   now %.1f dBFS %s  max/60s %.1f dBFS%s",
+               static_cast<double>(this->audio_.speaker_level_db()), this->audio_.speaker_level_bar(),
+               static_cast<double>(this->audio_.speaker_peak_hold_db()),
+               this->audio_.loopback() ? "  <-- LOOPBACK TEST ON" : "");
+      // The line that answers "I press the test beep and hear nothing". The
+      // speaker reports how much it took; offered without written means the
+      // sink refuses the data and no volume setting will ever produce a sound.
+      const uint32_t offered = this->audio_.speaker_bytes_offered();
+      const char *verdict = "";
+      if (offered == 0) {
+        // Not a fault, and the distinction matters: nothing has been sent to the
+        // speaker, so it has had no chance to fail. Press the test beep before
+        // suspecting the output at all.
+        verdict = "   (nothing played yet -- press the test beep)";
+      } else if (this->audio_.speaker_bytes_written() == 0) {
+        verdict = "   <-- THE SPEAKER IS REFUSING EVERYTHING";
+      }
+      ESP_LOGI(TAG, "         %" PRIu32 " bytes offered, %" PRIu32 " accepted, %" PRIu32 " short writes%s",
+               offered, this->audio_.speaker_bytes_written(), this->audio_.speaker_drops(), verdict);
+    } else {
+      ESP_LOGI(TAG, "  spk:   no speaker configured -- backchannel disabled, nothing can come out");
+    }
   } else {
     ESP_LOGI(TAG, "  audio: pipeline not running (no 'audio:' block configured?)");
   }
 
-  // The three readings that place a fault without leaving this log:
+  // The readings that place a fault without leaving this log:
   //   backchannel=NO      -> the client never asked to talk (card mode, HTTPS,
   //                          or go2rtc source without '#backchannel=1')
   //   frames dropped > 0  -> the link cannot carry the stream: lower
   //                          'jpeg_quality' or 'framerate'
   //   backchannel received stuck at 0 while you press talk -> nothing reaches
   //                          the device; the fault is upstream, not here
+  //   mic peak flat at -100 dBFS while you speak -> the fault is on the device,
+  //                          upstream of the network; nothing sent will help
   ESP_LOGI(TAG, "-----------------------------------------------------------");
 }
 
@@ -656,8 +712,29 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
 
   if (method == "DESCRIBE") {
     const std::string require = to_lower(header_value(request, "Require"));
-    session.wants_backchannel =
-        require.find("www.onvif.org/ver20/backchannel") != std::string::npos && this->audio_.has_speaker();
+    const bool asked = require.find("www.onvif.org/ver20/backchannel") != std::string::npos;
+    // `backchannel: always` announces the sendonly track to everyone, so that a
+    // client which only probes the stream can still SEE that this camera can be
+    // talked to. Without it the capability exists but is undiscoverable, and
+    // every card that asks "does it do two-way audio?" answers no.
+    session.wants_backchannel = (asked || this->always_advertise_backchannel_) && this->audio_.has_speaker();
+
+    // Counted separately so the status block can distinguish the two ways the
+    // talk path stays silent, which look identical from Home Assistant:
+    //   describes_with_backchannel_ == 0 -> nobody ever ASKED to talk. The
+    //     device is fine; go2rtc only requests the backchannel when a consumer
+    //     actually wants to send audio, so this is normal until a browser opens
+    //     the stream with a microphone.
+    //   asked, but the track is never SETUP -> the client asked and gave up,
+    //     which points at the SDP or at the client.
+    this->describes_total_++;
+    if (asked) {
+      this->describes_with_backchannel_++;
+      if (!this->audio_.has_speaker())
+        ESP_LOGW(TAG, "a client asked for the ONVIF backchannel but no speaker is configured");
+      else
+        ESP_LOGI(TAG, "backchannel requested by the client; announcing the sendonly track");
+    }
 
     const std::string local_ip = this->local_ip_of_(session.fd);
     const std::string sdp = this->build_sdp_(local_ip, session.wants_backchannel);
@@ -759,20 +836,6 @@ void RTSPServer::handle_request_(RtspSession &session, const std::string &reques
 }
 
 std::string RTSPServer::build_sdp_(const std::string &local_ip, bool with_backchannel) {
-  std::string sps_b64;
-  std::string pps_b64;
-  std::string profile;
-
-  {
-    LockGuard guard(this->parameter_sets_lock_);
-    if (this->sps_.size() >= 4) {
-      sps_b64 = base64_encode(this->sps_.data(), this->sps_.size());
-      profile = hex_byte(this->sps_[1]) + hex_byte(this->sps_[2]) + hex_byte(this->sps_[3]);
-    }
-    if (!this->pps_.empty())
-      pps_b64 = base64_encode(this->pps_.data(), this->pps_.size());
-  }
-
   std::string sdp;
   sdp += "v=0\r\n";
   sdp += "o=- 0 0 IN IP4 " + local_ip + "\r\n";
@@ -782,22 +845,7 @@ std::string RTSPServer::build_sdp_(const std::string &local_ip, bool with_backch
   sdp += "a=tool:esphome-rtsp\r\n";
   sdp += "a=control:*\r\n";
 
-  if (this->video_enabled_ && this->video_config_.codec == VideoCodec::H264) {
-    char buf[128];
-    sdp += "m=video 0 RTP/AVP 96\r\n";
-    snprintf(buf, sizeof(buf), "b=AS:%" PRIu32 "\r\n", this->video_config_.bitrate / 1000);
-    sdp += buf;
-    sdp += "a=rtpmap:96 H264/90000\r\n";
-
-    sdp += "a=fmtp:96 packetization-mode=1";
-    if (!profile.empty())
-      sdp += ";profile-level-id=" + profile;
-    if (!sps_b64.empty() && !pps_b64.empty())
-      sdp += ";sprop-parameter-sets=" + sps_b64 + "," + pps_b64;
-    sdp += "\r\n";
-
-    sdp += "a=control:trackID=0\r\n";
-  } else if (this->video_enabled_) {
+  if (this->video_enabled_) {
     // RFC 2435: JPEG is a static payload type, and everything a decoder needs
     // (size, subsampling, quantization tables) travels in the RTP payload
     // header, so the media description carries no format parameters at all.

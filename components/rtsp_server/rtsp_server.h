@@ -56,6 +56,21 @@ class RTSPServer : public Component, public RtpSender {
   void set_path(const std::string &path) { this->path_ = path; }
   void set_credentials(const std::string &user, const std::string &password);
   void set_max_clients(uint8_t max_clients) { this->max_clients_ = max_clients; }
+  void set_tx_buffer(size_t bytes, bool psram) {
+    this->tx_ring_bytes_ = bytes;
+    this->tx_ring_psram_ = psram;
+  }
+  /// When true, the `sendonly` backchannel track is announced in every SDP,
+  /// even to a client that did not send the ONVIF `Require` header.
+  ///
+  /// ONVIF says to announce it only on request, and that is the default. But a
+  /// track that is only announced on request is INVISIBLE to anything that
+  /// merely probes the stream -- and go2rtc, Frigate and the Lovelace camera
+  /// cards all decide "does this camera support two-way audio?" from exactly
+  /// such a probe. The result is a talk button that never appears, on a device
+  /// whose backchannel works perfectly. Announcing it always makes the
+  /// capability discoverable.
+  void set_always_advertise_backchannel(bool always) { this->always_advertise_backchannel_ = always; }
   void set_packet_size(uint16_t size) { this->packet_size_ = size; }
   void set_video_config(const VideoPipeline::Config &config) {
     this->video_config_ = config;
@@ -66,6 +81,11 @@ class RTSPServer : public Component, public RtpSender {
     this->audio_enabled_ = true;
   }
   void set_camera(esp_cam_sensor::MipiDSICamComponent *camera) { this->video_.set_camera(camera); }
+  /// Take over (or hand back) the V4L2 dequeue at runtime -- call this from
+  /// whatever turns the LVGL preview on and off, so the camera always has
+  /// exactly one consumer driving it. See VideoPipeline::set_drive_camera.
+  void set_drive_camera(bool drive) { this->video_.set_drive_camera(drive); }
+  bool drive_camera() const { return this->video_.drive_camera(); }
   void set_microphone(microphone::Microphone *microphone) { this->audio_.set_microphone(microphone); }
   void set_speaker(speaker::Speaker *speaker) { this->audio_.set_speaker(speaker); }
 
@@ -85,6 +105,54 @@ class RTSPServer : public Component, public RtpSender {
   uint8_t client_count() const { return this->client_count_; }
   bool is_streaming() const { return this->active_streams_ > 0; }
   bool is_talking() const { return this->audio_.is_talking(); }
+
+  // ---- audio diagnostics, usable from lambdas ------------------------------
+  // These exist so "is the microphone working?" can be answered from Home
+  // Assistant or from the screen, without a scope and without go2rtc. They
+  // read live counters and levels, so they are cheap enough to poll every
+  // second from a template sensor.
+
+  /// True once the capture/playback tasks are up.
+  bool audio_running() const { return this->audio_.is_running(); }
+  /// True when a speaker is wired, i.e. when the backchannel can be announced.
+  bool has_speaker() const { return this->audio_.has_speaker(); }
+  /// Peak level of the microphone over the last window, 0.0 – 1.0, gain applied.
+  float mic_level() const { return this->audio_.mic_level(); }
+  /// Same reading in dBFS: -100.0 for digital silence, 0.0 for full scale.
+  float mic_level_db() const { return this->audio_.mic_level_db(); }
+  /// Peak level of what is being pushed to the speaker, 0.0 – 1.0.
+  float speaker_level() const { return this->audio_.speaker_level(); }
+  float speaker_level_db() const { return this->audio_.speaker_level_db(); }
+  /// Loudest level of the last minute. This is the one to put on a Home
+  /// Assistant sensor: a level that decays in a second is unreadable at any
+  /// polling interval a sensor can use.
+  float mic_peak_hold_db() const { return this->audio_.mic_peak_hold_db(); }
+  float speaker_peak_hold_db() const { return this->audio_.speaker_peak_hold_db(); }
+  /// Bytes handed to the speaker versus bytes it accepted. `written` stuck at 0
+  /// while `offered` climbs is the signature of a sink that refuses everything.
+  uint32_t speaker_bytes_offered() const { return this->audio_.speaker_bytes_offered(); }
+  uint32_t speaker_bytes_written() const { return this->audio_.speaker_bytes_written(); }
+  uint32_t speaker_drops() const { return this->audio_.speaker_drops(); }
+  /// False when the speaker is refusing or truncating what it is given.
+  bool speaker_healthy() const { return this->audio_.speaker_healthy(); }
+  /// PCM samples read from the microphone since boot. Frozen at 0 means the
+  /// source delivers nothing at all -- a different fault from "delivers silence".
+  uint32_t mic_samples() const { return this->audio_.mic_samples(); }
+  /// True while the microphone source keeps delivering samples.
+  bool mic_alive() const { return this->audio_.mic_alive(); }
+  uint32_t audio_packets_sent() const { return this->audio_.packets_sent(); }
+  uint32_t audio_packets_received() const { return this->audio_.packets_received(); }
+  uint32_t audio_packets_dropped() const { return this->audio_.packets_dropped(); }
+
+  /// Route the microphone straight to the speaker, locally. Speak and you hear
+  /// yourself: one press proves capture, companding and playback at once, with
+  /// no network, no go2rtc and no browser in the way.
+  void set_audio_loopback(bool enabled) { this->audio_.set_loopback(enabled); }
+  bool audio_loopback() const { return this->audio_.loopback(); }
+  /// Play a beep on the speaker. Proves the output path on its own.
+  void play_test_tone(uint32_t frequency, uint32_t duration_ms) {
+    this->audio_.play_test_tone(frequency, duration_ms);
+  }
 
   // ---- RtpSender ----------------------------------------------------------
   void send_rtp(StreamKind kind, uint8_t *buf, size_t rtp_len) override;
@@ -111,16 +179,21 @@ class RTSPServer : public Component, public RtpSender {
   std::string build_sdp_(const std::string &local_ip, bool with_backchannel);
   std::string local_ip_of_(int fd) const;
 
-  void on_video_frame_(const uint8_t *au, size_t len, uint32_t timestamp);
+  void on_video_frame_(const uint8_t *jpeg, size_t len, uint32_t timestamp);
   void on_audio_frame_(const uint8_t *g711, size_t count, uint32_t timestamp);
-  void cache_parameter_sets_(const uint8_t *au, size_t len);
 
   // ---- configuration ------------------------------------------------------
   uint16_t port_{8554};
   std::string path_{"/doorbell"};
   std::string auth_token_;  ///< pre-computed "Basic <base64>" value, empty = open
   uint8_t max_clients_{2};
+  /// Size of the transmit ring, and where it lives. See setup(): this is the
+  /// real ceiling on resolution, since a frame that outruns the link is dropped
+  /// whole rather than torn.
+  size_t tx_ring_bytes_{192 * 1024};
+  bool tx_ring_psram_{false};
   uint16_t packet_size_{1400};
+  bool always_advertise_backchannel_{false};
 
   bool video_enabled_{false};
   bool audio_enabled_{false};
@@ -131,7 +204,6 @@ class RTSPServer : public Component, public RtpSender {
   VideoPipeline video_;
   AudioPipeline audio_;
 
-  std::unique_ptr<H264Packetizer> h264_packetizer_;
   std::unique_ptr<MjpegPacketizer> mjpeg_packetizer_;
   std::unique_ptr<G711Packetizer> audio_packetizer_;
 
@@ -139,10 +211,6 @@ class RTSPServer : public Component, public RtpSender {
   std::vector<std::unique_ptr<RtspSession>> sessions_;
   TaskHandle_t network_task_{nullptr};
   RingbufHandle_t tx_ring_{nullptr};
-
-  Mutex parameter_sets_lock_;
-  std::vector<uint8_t> sps_;
-  std::vector<uint8_t> pps_;
 
   bool pipelines_started_{false};
   uint32_t session_counter_{0};
@@ -159,6 +227,12 @@ class RTSPServer : public Component, public RtpSender {
   /// against the network task, which owns `sessions_`.
   volatile uint8_t negotiated_mask_{0};
   uint32_t last_status_ms_{0};
+  /// DESCRIBEs seen, and how many of them asked for the ONVIF backchannel.
+  /// Zero of the latter means nobody ever tried to talk -- which is the normal
+  /// state until a viewer opens the stream with a microphone, and must not be
+  /// read as a fault.
+  volatile uint32_t describes_total_{0};
+  volatile uint32_t describes_with_backchannel_{0};
 
   /// Periodic one-block summary of the whole chain, for diagnosis.
   void log_status_();
